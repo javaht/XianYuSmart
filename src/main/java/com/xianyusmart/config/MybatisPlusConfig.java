@@ -52,7 +52,7 @@ public class MybatisPlusConfig {
                 return TenantContext.get() == null || !TENANT_TABLES.contains(tableName.toLowerCase());
             }
         }));
-        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.SQLITE));
         return interceptor;
     }
 }

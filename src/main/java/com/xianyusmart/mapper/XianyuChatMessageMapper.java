@@ -24,7 +24,7 @@ public interface XianyuChatMessageMapper {
             "#{contentType}, #{msgContent}, " +
             "#{senderUserName}, #{senderUserId}, #{senderAppV}, #{senderOsType}, " +
             "#{reminderUrl}, #{xyGoodsId}, #{completeMsg}, #{messageTime}" +
-            ") ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)")
+            ") ON CONFLICT(xianyu_account_id, pnm_id) DO NOTHING")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(XianyuChatMessage message);
     

@@ -12,12 +12,12 @@ import org.apache.ibatis.annotations.Update;
 public interface XianyuKamiExternalRequestMapper extends BaseMapper<XianyuKamiExternalRequest> {
 
     @Insert("""
-            INSERT IGNORE INTO xianyu_kami_external_request
+            INSERT OR IGNORE INTO xianyu_kami_external_request
                 (kami_config_id, xianyu_account_id, order_id, request_token, quantity,
                  request_status, attempt_count, create_time, update_time)
             VALUES
                 (#{request.kamiConfigId}, #{request.xianyuAccountId}, #{request.orderId},
-                 #{request.requestToken}, #{request.quantity}, 'PROCESSING', 1, NOW(3), NOW(3))
+                 #{request.requestToken}, #{request.quantity}, 'PROCESSING', 1, datetime('now'), datetime('now'))
             """)
     int insertIfAbsent(@Param("request") XianyuKamiExternalRequest request);
 
@@ -44,12 +44,12 @@ public interface XianyuKamiExternalRequestMapper extends BaseMapper<XianyuKamiEx
                 attempt_count = attempt_count + 1,
                 exception_revision = exception_revision + 1,
                 error_message = NULL,
-                update_time = NOW(3)
+                update_time = datetime('now')
             WHERE id = #{id}
               AND attempt_count < 3
               AND (
                 request_status = 'FAILED'
-                OR (request_status = 'PROCESSING' AND update_time < DATE_SUB(NOW(3), INTERVAL 2 MINUTE))
+                OR (request_status = 'PROCESSING' AND update_time < datetime('now', '-2 minutes'))
               )
             """)
     int claimRetry(@Param("id") Long id);
@@ -59,7 +59,7 @@ public interface XianyuKamiExternalRequestMapper extends BaseMapper<XianyuKamiEx
             SET request_status = 'SUCCESS',
                 response_excerpt = #{responseExcerpt},
                 error_message = NULL,
-                update_time = NOW(3)
+                update_time = datetime('now')
             WHERE id = #{id} AND request_status = 'PROCESSING'
             """)
     int markSuccess(@Param("id") Long id, @Param("responseExcerpt") String responseExcerpt);
@@ -69,7 +69,7 @@ public interface XianyuKamiExternalRequestMapper extends BaseMapper<XianyuKamiEx
             SET request_status = #{status},
                 error_message = #{errorMessage},
                 exception_revision = exception_revision + 1,
-                update_time = NOW(3)
+                update_time = datetime('now')
             WHERE id = #{id} AND request_status = 'PROCESSING'
             """)
     int markFailure(@Param("id") Long id,

@@ -1,0 +1,19 @@
+-- SQLite 多租户字段补齐
+ALTER TABLE xianyu_account ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_cookie ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_chat_message ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_config ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_auto_delivery_config ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_order ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_auto_reply_record ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_operation_log ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_sys_setting ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_kami_config ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_kami_item ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_kami_usage_record ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_keyword_reply_rule ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_keyword_reply_content ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_sku ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_goods_sku_property ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xianyu_human_intervention_record ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;

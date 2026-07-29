@@ -13,8 +13,8 @@ import java.util.List;
 public interface XianyuGoodsAutoDeliveryConfigMapper extends BaseMapper<XianyuGoodsAutoDeliveryConfig> {
     
     @Select("SELECT id, xianyu_account_id, xianyu_goods_id, xy_goods_id, delivery_mode, fixed_template_id, sku_id, sku_name, auto_delivery_content, kami_config_ids, kami_delivery_template, delivery_message_template, voucher_delivery_enabled, chat_delivery_enabled, receipt_follow_up_messages, receipt_follow_up_interval_seconds, auto_delivery_image_url, auto_confirm_shipment, rag_delay_seconds, " +
-            "DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') as create_time, " +
-            "DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') as update_time " +
+            "strftime('%Y-%m-%d %H:%M:%S', create_time) as create_time, " +
+            "strftime('%Y-%m-%d %H:%M:%S', update_time) as update_time " +
             "FROM xianyu_goods_auto_delivery_config " +
             "WHERE xianyu_account_id = #{xianyuAccountId} AND xy_goods_id = #{xyGoodsId} AND sku_id = #{skuId} " +
             "LIMIT 1")
@@ -23,8 +23,8 @@ public interface XianyuGoodsAutoDeliveryConfigMapper extends BaseMapper<XianyuGo
                                                                      @Param("skuId") String skuId);
     
     @Select("SELECT id, xianyu_account_id, xianyu_goods_id, xy_goods_id, delivery_mode, fixed_template_id, sku_id, sku_name, auto_delivery_content, kami_config_ids, kami_delivery_template, delivery_message_template, voucher_delivery_enabled, chat_delivery_enabled, receipt_follow_up_messages, receipt_follow_up_interval_seconds, auto_delivery_image_url, auto_confirm_shipment, rag_delay_seconds, " +
-            "DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') as create_time, " +
-            "DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') as update_time " +
+            "strftime('%Y-%m-%d %H:%M:%S', create_time) as create_time, " +
+            "strftime('%Y-%m-%d %H:%M:%S', update_time) as update_time " +
             "FROM xianyu_goods_auto_delivery_config " +
             "WHERE xianyu_account_id = #{xianyuAccountId} AND xy_goods_id = #{xyGoodsId} AND sku_id IS NULL " +
             "LIMIT 1")
@@ -32,8 +32,8 @@ public interface XianyuGoodsAutoDeliveryConfigMapper extends BaseMapper<XianyuGo
                                                                   @Param("xyGoodsId") String xyGoodsId);
     
     @Select("SELECT id, xianyu_account_id, xianyu_goods_id, xy_goods_id, delivery_mode, fixed_template_id, sku_id, sku_name, auto_delivery_content, kami_config_ids, kami_delivery_template, delivery_message_template, voucher_delivery_enabled, chat_delivery_enabled, receipt_follow_up_messages, receipt_follow_up_interval_seconds, auto_delivery_image_url, auto_confirm_shipment, rag_delay_seconds, " +
-            "DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') as create_time, " +
-            "DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') as update_time " +
+            "strftime('%Y-%m-%d %H:%M:%S', create_time) as create_time, " +
+            "strftime('%Y-%m-%d %H:%M:%S', update_time) as update_time " +
             "FROM xianyu_goods_auto_delivery_config " +
             "WHERE xianyu_account_id = #{xianyuAccountId} AND xy_goods_id = #{xyGoodsId} " +
             "ORDER BY sku_id ASC")
@@ -41,8 +41,8 @@ public interface XianyuGoodsAutoDeliveryConfigMapper extends BaseMapper<XianyuGo
                                                                    @Param("xyGoodsId") String xyGoodsId);
     
     @Select("SELECT id, xianyu_account_id, xianyu_goods_id, xy_goods_id, delivery_mode, fixed_template_id, sku_id, sku_name, auto_delivery_content, kami_config_ids, kami_delivery_template, delivery_message_template, voucher_delivery_enabled, chat_delivery_enabled, receipt_follow_up_messages, receipt_follow_up_interval_seconds, auto_delivery_image_url, auto_confirm_shipment, rag_delay_seconds, " +
-            "DATE_FORMAT(create_time, '%Y-%m-%d %H:%i:%s') as create_time, " +
-            "DATE_FORMAT(update_time, '%Y-%m-%d %H:%i:%s') as update_time " +
+            "strftime('%Y-%m-%d %H:%M:%S', create_time) as create_time, " +
+            "strftime('%Y-%m-%d %H:%M:%S', update_time) as update_time " +
             "FROM xianyu_goods_auto_delivery_config " +
             "WHERE xianyu_account_id = #{xianyuAccountId} " +
             "ORDER BY create_time DESC")
