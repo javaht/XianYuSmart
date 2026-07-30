@@ -25,10 +25,13 @@ public interface XianyuBuyerProfileMapper extends BaseMapper<XianyuBuyerProfile>
 
     @Insert("INSERT INTO xianyu_buyer_profile (tenant_id, xianyu_account_id, buyer_user_id, " +
             "buyer_user_name, last_interaction_time) VALUES (#{tenantId}, #{accountId}, #{buyerUserId}, " +
-            "#{buyerUserName}, #{interactionTime}) ON DUPLICATE KEY UPDATE " +
-            "buyer_user_name = COALESCE(NULLIF(VALUES(buyer_user_name), ''), buyer_user_name), " +
-            "last_interaction_time = GREATEST(COALESCE(last_interaction_time, VALUES(last_interaction_time)), " +
-            "VALUES(last_interaction_time))")
+            "#{buyerUserName}, #{interactionTime}) ON CONFLICT(tenant_id, xianyu_account_id, buyer_user_id) DO UPDATE SET " +
+            "buyer_user_name = COALESCE(NULLIF(excluded.buyer_user_name, ''), buyer_user_name), " +
+            "last_interaction_time = CASE " +
+            "WHEN excluded.last_interaction_time IS NULL THEN last_interaction_time " +
+            "WHEN last_interaction_time IS NULL THEN excluded.last_interaction_time " +
+            "WHEN excluded.last_interaction_time > last_interaction_time THEN excluded.last_interaction_time " +
+            "ELSE last_interaction_time END")
     int touch(@Param("tenantId") Long tenantId,
               @Param("accountId") Long accountId,
               @Param("buyerUserId") String buyerUserId,
@@ -49,9 +52,9 @@ public interface XianyuBuyerProfileMapper extends BaseMapper<XianyuBuyerProfile>
             "FROM xianyu_buyer_profile profile WHERE 1 = 1 " +
             "<if test='accountId != null'>AND profile.xianyu_account_id = #{accountId} </if>" +
             "<if test='blocked != null'>AND profile.automation_blocked = #{blocked} </if>" +
-            "<if test='keyword != null and keyword != \"\"'>AND (profile.buyer_user_name LIKE CONCAT('%', #{keyword}, '%') " +
-            "OR profile.buyer_user_id LIKE CONCAT('%', #{keyword}, '%') OR profile.tags_json LIKE CONCAT('%', #{keyword}, '%') " +
-            "OR profile.note LIKE CONCAT('%', #{keyword}, '%')) </if>" +
+            "<if test='keyword != null and keyword != \"\"'>AND (profile.buyer_user_name LIKE '%' || #{keyword} || '%' " +
+            "OR profile.buyer_user_id LIKE '%' || #{keyword} || '%' OR profile.tags_json LIKE '%' || #{keyword} || '%' " +
+            "OR profile.note LIKE '%' || #{keyword} || '%') </if>" +
             "ORDER BY profile.automation_blocked DESC, profile.last_interaction_time DESC, profile.id DESC " +
             "LIMIT #{limit} OFFSET #{offset}" +
             "</script>")
@@ -65,9 +68,9 @@ public interface XianyuBuyerProfileMapper extends BaseMapper<XianyuBuyerProfile>
             "SELECT COUNT(*) FROM xianyu_buyer_profile profile WHERE 1 = 1 " +
             "<if test='accountId != null'>AND profile.xianyu_account_id = #{accountId} </if>" +
             "<if test='blocked != null'>AND profile.automation_blocked = #{blocked} </if>" +
-            "<if test='keyword != null and keyword != \"\"'>AND (profile.buyer_user_name LIKE CONCAT('%', #{keyword}, '%') " +
-            "OR profile.buyer_user_id LIKE CONCAT('%', #{keyword}, '%') OR profile.tags_json LIKE CONCAT('%', #{keyword}, '%') " +
-            "OR profile.note LIKE CONCAT('%', #{keyword}, '%')) </if>" +
+            "<if test='keyword != null and keyword != \"\"'>AND (profile.buyer_user_name LIKE '%' || #{keyword} || '%' " +
+            "OR profile.buyer_user_id LIKE '%' || #{keyword} || '%' OR profile.tags_json LIKE '%' || #{keyword} || '%' " +
+            "OR profile.note LIKE '%' || #{keyword} || '%') </if>" +
             "</script>")
     long countPage(@Param("accountId") Long accountId,
                    @Param("keyword") String keyword,

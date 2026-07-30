@@ -21,7 +21,7 @@ public interface XianyuNotificationChannelMapper extends BaseMapper<XianyuNotifi
     @Select("SELECT * FROM xianyu_notification_channel WHERE enabled = 1 ORDER BY id")
     List<XianyuNotificationChannel> selectEnabled();
 
-    @Update("UPDATE xianyu_notification_channel SET last_success_time = NOW(3), last_error_message = NULL " +
+    @Update("UPDATE xianyu_notification_channel SET last_success_time = datetime('now'), last_error_message = NULL " +
             "WHERE id = #{id}")
     int markSuccess(@Param("id") Long id);
 

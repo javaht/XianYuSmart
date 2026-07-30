@@ -31,14 +31,10 @@ fi
 
 if [ ! -f .env ]; then
     cp .env.example .env
-    DB_PASSWORD="$(random_hex 24)"
-    DB_ROOT_PASSWORD="$(random_hex 24)"
     JWT_SECRET="$(random_hex 48)"
     BOOTSTRAP_ADMIN_PASSWORD="$(random_hex 12)"
 
     # 首次安装生成独立密钥，避免示例凭据进入运行环境。
-    sed -i "s/change-me-database-password/$DB_PASSWORD/" .env
-    sed -i "s/change-me-root-password/$DB_ROOT_PASSWORD/" .env
     sed -i "s/change-me-to-at-least-32-random-bytes/$JWT_SECRET/" .env
     sed -i "s/change-me-bootstrap-admin-password/$BOOTSTRAP_ADMIN_PASSWORD/" .env
     chmod 600 .env

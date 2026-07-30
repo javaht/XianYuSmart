@@ -34,14 +34,14 @@ public interface MerchantTaskMapper extends BaseMapper<MerchantTask> {
     @Select("SELECT COUNT(*) AS taskCount, COALESCE(SUM(CASE WHEN status = -1 THEN 1 ELSE 0 END), 0) AS failedTaskCount FROM merchant_task")
     Map<String, Object> selectOverviewCounts();
 
-    @Select("SELECT * FROM merchant_task WHERE ((status = 0 AND scheduled_time <= NOW(3)) " +
-            "OR (status = -1 AND attempt_count < max_attempts AND next_retry_time <= NOW(3)) " +
-            "OR (status = 1 AND attempt_count < max_attempts AND updated_time <= DATE_SUB(NOW(3), INTERVAL 10 MINUTE))) " +
+    @Select("SELECT * FROM merchant_task WHERE ((status = 0 AND scheduled_time <= datetime('now')) " +
+            "OR (status = -1 AND attempt_count < max_attempts AND next_retry_time <= datetime('now')) " +
+            "OR (status = 1 AND attempt_count < max_attempts AND updated_time <= datetime('now', '-10 minutes'))) " +
             "ORDER BY scheduled_time, id LIMIT #{limit}")
     List<MerchantTask> selectDue(@Param("limit") int limit);
 
     @Update("UPDATE merchant_task SET status = 1, attempt_count = attempt_count + 1 " +
-            "WHERE id = #{id} AND (status IN (0, -1) OR (status = 1 AND updated_time <= DATE_SUB(NOW(3), INTERVAL 10 MINUTE)))")
+            "WHERE id = #{id} AND (status IN (0, -1) OR (status = 1 AND updated_time <= datetime('now', '-10 minutes')))")
     int claim(@Param("id") Long id);
 
     @Update("UPDATE merchant_task SET status = 2, result_json = #{resultJson}, error_message = NULL, next_retry_time = NULL WHERE id = #{id}")
@@ -51,6 +51,6 @@ public interface MerchantTaskMapper extends BaseMapper<MerchantTask> {
     int fail(@Param("id") Long id, @Param("errorMessage") String errorMessage,
              @Param("nextRetryTime") LocalDateTime nextRetryTime);
 
-    @Update("UPDATE merchant_task SET status = 0, attempt_count = 0, scheduled_time = NOW(3), next_retry_time = NULL, error_message = NULL WHERE id = #{id}")
+    @Update("UPDATE merchant_task SET status = 0, attempt_count = 0, scheduled_time = datetime('now'), next_retry_time = NULL, error_message = NULL WHERE id = #{id}")
     int requeue(@Param("id") Long id);
 }

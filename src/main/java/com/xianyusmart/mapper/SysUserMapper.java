@@ -14,6 +14,6 @@ import java.util.List;
 @Mapper
 public interface SysUserMapper extends BaseMapper<SysUser> {
 
-    @Select("SELECT id FROM sys_user WHERE role = 'ADMIN' AND status = 1 FOR UPDATE")
+    @Select("SELECT id FROM sys_user WHERE role = 'ADMIN' AND status = 1")
     List<Long> lockActiveAdminIds();
 }

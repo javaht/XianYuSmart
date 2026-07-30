@@ -26,7 +26,7 @@ public interface MerchantResourceMapper extends BaseMapper<MerchantResource> {
     List<Map<String, Object>> selectTypeCounts();
 
     @Select("SELECT * FROM merchant_resource WHERE status = 1 AND resource_type IN ('SELECTION_RULE','PUBLISH_RULE','DELETE_RULE') " +
-            "AND scheduled_time IS NOT NULL AND scheduled_time <= NOW(3) ORDER BY scheduled_time LIMIT #{limit}")
+            "AND scheduled_time IS NOT NULL AND scheduled_time <= datetime('now') ORDER BY scheduled_time LIMIT #{limit}")
     List<MerchantResource> selectDueRules(@Param("limit") int limit);
 
     @Select("SELECT * FROM merchant_resource WHERE tenant_id = #{tenantId} AND resource_type = #{type} AND status = 1 ORDER BY id")
@@ -42,6 +42,6 @@ public interface MerchantResourceMapper extends BaseMapper<MerchantResource> {
                                                    @Param("type") String type,
                                                    @Param("goodsId") String goodsId);
 
-    @Update("UPDATE merchant_resource SET last_run_time = NOW(3), scheduled_time = #{nextTime} WHERE id = #{id}")
+    @Update("UPDATE merchant_resource SET last_run_time = datetime('now'), scheduled_time = #{nextTime} WHERE id = #{id}")
     int updateNextRun(@Param("id") Long id, @Param("nextTime") LocalDateTime nextTime);
 }

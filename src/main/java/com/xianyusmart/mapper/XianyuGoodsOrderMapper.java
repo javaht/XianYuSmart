@@ -23,11 +23,11 @@ public interface XianyuGoodsOrderMapper {
               (SELECT COUNT(*) FROM xianyu_goods WHERE status = 1) AS off_shelf_item_count,
               (SELECT COUNT(*) FROM xianyu_goods WHERE status = 2) AS sold_item_count,
               (SELECT COALESCE(SUM(CAST(total_price AS DECIMAL(12, 2))), 0)
-                 FROM xianyu_goods_order WHERE state = 1 AND create_time >= CURRENT_DATE) AS today_revenue,
+                 FROM xianyu_goods_order WHERE state = 1 AND date(create_time) = date('now')) AS today_revenue,
               (SELECT COUNT(*) FROM xianyu_goods_order
-                 WHERE state = 1 AND create_time >= CURRENT_DATE) AS today_delivery_count,
+                 WHERE state = 1 AND date(create_time) = date('now')) AS today_delivery_count,
               (SELECT COUNT(*) FROM xianyu_goods_auto_reply_record
-                 WHERE state = 1 AND create_time >= CURRENT_DATE) AS today_reply_count,
+                 WHERE state = 1 AND date(create_time) = date('now')) AS today_reply_count,
               (SELECT COUNT(*) FROM xianyu_goods_order
                  WHERE delivery_status IN ('PENDING', 'PROCESSING', 'RETRY_WAIT')) AS pending_task_count,
               (SELECT COUNT(*) FROM xianyu_goods_order
@@ -47,7 +47,26 @@ public interface XianyuGoodsOrderMapper {
     
     @Insert("INSERT INTO xianyu_goods_order (xianyu_account_id, xianyu_goods_id, xy_goods_id, pnm_id, order_id, buyer_user_id, buyer_user_name, sid, content, state, fail_reason, confirm_state, goods_title, sku_name, sku_id, order_create_time, pay_success_time, consign_time, total_price, buy_num, delivery_status, expected_quantity, delivery_channel) " +
             "VALUES (#{xianyuAccountId}, #{xianyuGoodsId}, #{xyGoodsId}, #{pnmId}, #{orderId}, #{buyerUserId}, #{buyerUserName}, #{sid}, #{content}, #{state}, #{failReason}, #{confirmState}, #{goodsTitle}, #{skuName}, #{skuId}, #{orderCreateTime}, #{paySuccessTime}, #{consignTime}, #{totalPrice}, COALESCE(#{buyNum}, 1), COALESCE(#{deliveryStatus}, CASE WHEN #{state} = 1 THEN 'COMPLETED' WHEN #{state} = -1 THEN 'FAILED' ELSE 'PENDING' END), COALESCE(#{expectedQuantity}, COALESCE(#{buyNum}, 1)), #{deliveryChannel}) " +
-            "ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)")
+            "ON CONFLICT(xianyu_account_id, pnm_id) DO UPDATE SET " +
+            "order_id = COALESCE(excluded.order_id, order_id), " +
+            "buyer_user_id = COALESCE(excluded.buyer_user_id, buyer_user_id), " +
+            "buyer_user_name = COALESCE(excluded.buyer_user_name, buyer_user_name), " +
+            "sid = COALESCE(excluded.sid, sid), " +
+            "content = COALESCE(excluded.content, content), " +
+            "state = excluded.state, " +
+            "fail_reason = excluded.fail_reason, " +
+            "confirm_state = excluded.confirm_state, " +
+            "goods_title = COALESCE(excluded.goods_title, goods_title), " +
+            "sku_name = COALESCE(excluded.sku_name, sku_name), " +
+            "sku_id = COALESCE(excluded.sku_id, sku_id), " +
+            "order_create_time = COALESCE(excluded.order_create_time, order_create_time), " +
+            "pay_success_time = COALESCE(excluded.pay_success_time, pay_success_time), " +
+            "consign_time = COALESCE(excluded.consign_time, consign_time), " +
+            "total_price = COALESCE(excluded.total_price, total_price), " +
+            "buy_num = excluded.buy_num, " +
+            "delivery_status = excluded.delivery_status, " +
+            "expected_quantity = excluded.expected_quantity, " +
+            "delivery_channel = COALESCE(excluded.delivery_channel, delivery_channel)")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(XianyuGoodsOrder record);
     
@@ -72,7 +91,7 @@ public interface XianyuGoodsOrderMapper {
             "AND r.xy_goods_id = #{xyGoodsId} " +
             "</if>" +
             "<if test='keyword != null and keyword != \"\"'>" +
-            "AND (g.title LIKE CONCAT('%', #{keyword}, '%') OR r.sku_name LIKE CONCAT('%', #{keyword}, '%') OR r.buyer_user_name LIKE CONCAT('%', #{keyword}, '%') OR r.content LIKE CONCAT('%', #{keyword}, '%')) " +
+            "AND (g.title LIKE '%' || #{keyword} || '%' OR r.sku_name LIKE '%' || #{keyword} || '%' OR r.buyer_user_name LIKE '%' || #{keyword} || '%' OR r.content LIKE '%' || #{keyword} || '%') " +
             "</if>" +
             "<if test='deliveryStatuses != null and !deliveryStatuses.isEmpty()'>" +
             "AND r.delivery_status IN <foreach collection='deliveryStatuses' item='status' open='(' separator=',' close=')'>#{status}</foreach> " +
@@ -126,7 +145,7 @@ public interface XianyuGoodsOrderMapper {
             "AND r.xy_goods_id = #{xyGoodsId} " +
             "</if>" +
             "<if test='keyword != null and keyword != \"\"'>" +
-            "AND (g.title LIKE CONCAT('%', #{keyword}, '%') OR r.sku_name LIKE CONCAT('%', #{keyword}, '%') OR r.buyer_user_name LIKE CONCAT('%', #{keyword}, '%') OR r.content LIKE CONCAT('%', #{keyword}, '%')) " +
+            "AND (g.title LIKE '%' || #{keyword} || '%' OR r.sku_name LIKE '%' || #{keyword} || '%' OR r.buyer_user_name LIKE '%' || #{keyword} || '%' OR r.content LIKE '%' || #{keyword} || '%') " +
             "</if>" +
             "<if test='deliveryStatuses != null and !deliveryStatuses.isEmpty()'>" +
             "AND r.delivery_status IN <foreach collection='deliveryStatuses' item='status' open='(' separator=',' close=')'>#{status}</foreach> " +
@@ -137,17 +156,17 @@ public interface XianyuGoodsOrderMapper {
     
     @Update("UPDATE xianyu_goods_order SET state = #{state}, " +
             "delivery_status = CASE WHEN #{state} = 1 THEN 'COMPLETED' WHEN #{state} = -1 THEN 'FAILED' ELSE delivery_status END, " +
-            "exception_revision = exception_revision + IF(#{state} = -1, 1, 0) WHERE id = #{id}")
+            "exception_revision = exception_revision + CASE WHEN #{state} = -1 THEN 1 ELSE 0 END WHERE id = #{id}")
     int updateState(@Param("id") Long id, @Param("state") Integer state);
     
     @Update("UPDATE xianyu_goods_order SET state = #{state}, content = #{content}, " +
             "delivery_status = CASE WHEN #{state} = 1 THEN 'COMPLETED' WHEN #{state} = -1 THEN 'FAILED' ELSE delivery_status END, " +
-            "exception_revision = exception_revision + IF(#{state} = -1, 1, 0) WHERE id = #{id}")
+            "exception_revision = exception_revision + CASE WHEN #{state} = -1 THEN 1 ELSE 0 END WHERE id = #{id}")
     int updateStateAndContent(@Param("id") Long id, @Param("state") Integer state, @Param("content") String content);
 
     @Update("UPDATE xianyu_goods_order SET state = #{state}, content = #{content}, fail_reason = #{failReason}, " +
             "delivery_status = CASE WHEN #{state} = 1 THEN 'COMPLETED' WHEN #{state} = -1 THEN 'FAILED' ELSE delivery_status END, " +
-            "exception_revision = exception_revision + IF(#{state} = -1, 1, 0) WHERE id = #{id}")
+            "exception_revision = exception_revision + CASE WHEN #{state} = -1 THEN 1 ELSE 0 END WHERE id = #{id}")
     int updateStateContentAndFailReason(@Param("id") Long id, @Param("state") Integer state, @Param("content") String content, @Param("failReason") String failReason);
     
     @Select("SELECT * FROM xianyu_goods_order WHERE xianyu_account_id = #{accountId} AND xy_goods_id = #{xyGoodsId} AND order_id = #{orderId} LIMIT 1")
@@ -160,14 +179,14 @@ public interface XianyuGoodsOrderMapper {
     XianyuGoodsOrder selectById(@Param("id") Long id);
 
     @Select("SELECT * FROM xianyu_goods_order WHERE " +
-            "((delivery_status IN ('PENDING', 'RETRY_WAIT') AND (next_retry_time IS NULL OR next_retry_time <= NOW(3))) " +
-            "OR (delivery_status = 'PROCESSING' AND lease_expire_time < NOW(3))) " +
+            "((delivery_status IN ('PENDING', 'RETRY_WAIT') AND (next_retry_time IS NULL OR next_retry_time <= datetime('now'))) " +
+            "OR (delivery_status = 'PROCESSING' AND lease_expire_time < datetime('now'))) " +
             "AND delivery_message_state NOT IN (3, 4, 5) " +
-            "ORDER BY create_time ASC LIMIT #{limit} FOR UPDATE")
+            "ORDER BY create_time ASC LIMIT #{limit}")
     List<XianyuGoodsOrder> lockDueTasks(@Param("limit") int limit);
 
     @Update("<script>UPDATE xianyu_goods_order SET delivery_status = 'PROCESSING', lease_owner = #{workerId}, " +
-            "lease_expire_time = DATE_ADD(NOW(3), INTERVAL #{leaseSeconds} SECOND), attempt_count = attempt_count + 1 " +
+            "lease_expire_time = datetime('now', '+' || #{leaseSeconds} || ' seconds'), attempt_count = attempt_count + 1 " +
             "WHERE id IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach></script>")
     int claimTasks(@Param("ids") List<Long> ids, @Param("workerId") String workerId,
                    @Param("leaseSeconds") int leaseSeconds);
@@ -178,7 +197,7 @@ public interface XianyuGoodsOrderMapper {
 
     @Update("UPDATE xianyu_goods_order SET delivery_status = #{status}, next_retry_time = #{nextRetryTime}, " +
             "lease_owner = NULL, lease_expire_time = NULL, last_error_code = 'DELIVERY_FAILED', last_error_message = #{errorMessage}, " +
-            "exception_revision = exception_revision + IF(#{status} IN ('FAILED', 'REVIEW_REQUIRED'), 1, 0) " +
+            "exception_revision = exception_revision + CASE WHEN #{status} IN ('FAILED', 'REVIEW_REQUIRED') THEN 1 ELSE 0 END " +
             "WHERE id = #{id} AND delivery_status NOT IN ('REVIEW_REQUIRED', 'COMPLETED')")
     int retryOrFailTask(@Param("id") Long id, @Param("status") String status,
                         @Param("nextRetryTime") java.time.LocalDateTime nextRetryTime,
@@ -189,11 +208,11 @@ public interface XianyuGoodsOrderMapper {
             "exception_revision = exception_revision + 1 WHERE id = #{id}")
     int markTaskReviewRequired(@Param("id") Long id, @Param("errorMessage") String errorMessage);
 
-    @Update("UPDATE xianyu_goods_order SET delivery_status = 'PENDING', next_retry_time = NOW(3), " +
+    @Update("UPDATE xianyu_goods_order SET delivery_status = 'PENDING', next_retry_time = datetime('now'), " +
             "lease_owner = NULL, lease_expire_time = NULL WHERE id = #{id} AND state <> 1 AND delivery_status IN ('FAILED', 'RETRY_WAIT')")
     int requeueTask(@Param("id") Long id);
 
-    @Update("UPDATE xianyu_goods_order SET delivery_status = 'PENDING', next_retry_time = NOW(3), " +
+    @Update("UPDATE xianyu_goods_order SET delivery_status = 'PENDING', next_retry_time = datetime('now'), " +
             "state = 0, fail_reason = NULL, attempt_count = 0, lease_owner = NULL, lease_expire_time = NULL, " +
             "last_error_code = NULL, last_error_message = NULL " +
             "WHERE id = #{id} AND xianyu_account_id = #{accountId} AND state <> 1 " +
@@ -211,11 +230,11 @@ public interface XianyuGoodsOrderMapper {
     @Update("UPDATE xianyu_goods_order SET confirm_state = 1 WHERE xianyu_account_id = #{accountId} AND order_id = #{orderId}")
     int updateConfirmState(@Param("accountId") Long accountId, @Param("orderId") String orderId);
 
-    @Update("UPDATE xianyu_goods_order SET rate_status = #{rateStatus}, rate_time = NOW(3) WHERE xianyu_account_id = #{accountId} AND order_id = #{orderId}")
+    @Update("UPDATE xianyu_goods_order SET rate_status = #{rateStatus}, rate_time = datetime('now') WHERE xianyu_account_id = #{accountId} AND order_id = #{orderId}")
     int updateRateStatus(@Param("accountId") Long accountId, @Param("orderId") String orderId,
                          @Param("rateStatus") Integer rateStatus);
 
-    @Update("UPDATE xianyu_goods_order SET rate_status = #{rateStatus}, rate_time = NOW(3), " +
+    @Update("UPDATE xianyu_goods_order SET rate_status = #{rateStatus}, rate_time = datetime('now'), " +
             "rate_content = #{rateContent}, rate_source = #{rateSource} " +
             "WHERE xianyu_account_id = #{accountId} AND order_id = #{orderId}")
     int updateRateResult(@Param("accountId") Long accountId, @Param("orderId") String orderId,
