@@ -1,5 +1,7 @@
 package com.xianyusmart.service.impl;
 
+import com.xianyusmart.exception.CaptchaRequiredException;
+import com.xianyusmart.exception.CookieExpiredException;
 import com.xianyusmart.service.AccountService;
 import com.xianyusmart.service.CaptchaSolveService;
 import com.xianyusmart.service.WebSocketService;
@@ -164,8 +166,37 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
         return tasks.get(accountId);
     }
 
+    @Override
+    public ManualFrame getManualFrame(Long accountId) {
+        requireManualTask(accountId);
+        ManualFrame frame = captchaBrowserRunner.getManualFrame(accountId);
+        if (frame == null) {
+            throw new IllegalStateException("人工浏览器画面正在生成");
+        }
+        return frame;
+    }
+
+    @Override
+    public TaskView submitManualDrag(Long accountId, ManualDrag drag) {
+        requireManualTask(accountId);
+        captchaBrowserRunner.submitManualDrag(accountId, drag);
+        return tasks.get(accountId);
+    }
+
+    private TaskView requireManualTask(Long accountId) {
+        if (accountId == null) {
+            throw new IllegalArgumentException("账号不能为空");
+        }
+        TaskView task = tasks.get(accountId);
+        if (!isActive(task) || task.mode() != Mode.MANUAL_BROWSER) {
+            throw new IllegalStateException("当前没有运行中的人工滑块任务");
+        }
+        return task;
+    }
+
     private void runTask(TaskView task, String captchaUrl, TaskControl control) {
         try {
+            String activeCaptchaUrl = captchaUrl;
             control.started.set(true);
             if (!isCurrentActive(tasks.get(control.accountId), control)) {
                 return;
@@ -173,15 +204,53 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
             updateProgress(control, new CaptchaBrowserRunner.ProgressUpdate(
                     "STARTING_BROWSER", "正在启动浏览器", 0, MAX_AUTO_ATTEMPTS));
 
+            if (task.mode() == Mode.AUTO) {
+                updateProgress(control, new CaptchaBrowserRunner.ProgressUpdate(
+                        "PAUSING_RECONNECT", "正在暂停后台重连，避免占用浏览器资源",
+                        0, MAX_AUTO_ATTEMPTS));
+                // 自动验证期间暂停同账号后台重连，避免两个浏览器任务争抢内存和页面响应。
+                webSocketService.stopWebSocket(task.xianyuAccountId());
+                updateProgress(control, new CaptchaBrowserRunner.ProgressUpdate(
+                        "REFRESHING_CHALLENGE", "正在刷新验证会话，避免使用过期滑块",
+                        0, MAX_AUTO_ATTEMPTS));
+                // 自动模式先刷新平台验证会话，已恢复时无需继续打开旧滑块页面。
+                tokenService.clearCaptchaWait(task.xianyuAccountId());
+                try {
+                    String refreshedToken = tokenService.refreshToken(task.xianyuAccountId());
+                    if (refreshedToken != null && !refreshedToken.isBlank()) {
+                        updateProgress(control, new CaptchaBrowserRunner.ProgressUpdate(
+                                "RECONNECTING", "凭证已恢复，正在重新连接",
+                                0, MAX_AUTO_ATTEMPTS));
+                        boolean connected = webSocketService.restartAfterCredentialUpdate(
+                                task.xianyuAccountId());
+                        complete(control,
+                                connected ? Status.SUCCEEDED : Status.FAILED,
+                                connected
+                                        ? "凭证已自动恢复并重新连接"
+                                        : "凭证已恢复，但重新连接失败");
+                        return;
+                    }
+                } catch (CaptchaRequiredException e) {
+                    if (e.getCaptchaUrl() != null && !e.getCaptchaUrl().isBlank()) {
+                        activeCaptchaUrl = e.getCaptchaUrl();
+                    }
+                } catch (CookieExpiredException e) {
+                    complete(control, Status.FAILED,
+                            "Cookie Session已过期，请重新扫码登录后再连接");
+                    return;
+                }
+            }
+
             String currentCookie = accountService.getCookieByAccountId(task.xianyuAccountId());
             if (currentCookie == null || currentCookie.isBlank()) {
                 complete(control, Status.FAILED, "账号Cookie不存在");
                 return;
             }
 
+            String browserCaptchaUrl = activeCaptchaUrl;
             FutureTask<CaptchaBrowserRunner.RunResult> browserFuture = new FutureTask<>(
                     () -> captchaBrowserRunner.run(
-                            task.xianyuAccountId(), task.mode(), captchaUrl, currentCookie,
+                            task.xianyuAccountId(), task.mode(), browserCaptchaUrl, currentCookie,
                             progress -> updateProgress(control, progress)));
             synchronized (control.startLock) {
                 if (!isCurrentActive(tasks.get(control.accountId), control)
@@ -209,13 +278,13 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
                     "UPDATING_COOKIE", "正在更新Cookie并恢复连接",
                     control.attempt, control.maxAttempts));
             String refreshedCookie = result.cookieText();
-            String unb = refreshedCookie == null
-                    ? null
-                    : XianyuSignUtils.parseCookies(refreshedCookie).get("unb");
+            String unb = XianyuSignUtils.extractUserId(refreshedCookie);
             if (unb == null || unb.isBlank()) {
                 complete(control, Status.FAILED, "验证完成但未获取到有效Cookie");
                 return;
             }
+            String normalizedCookie = XianyuSignUtils.normalizeCookieUserId(
+                    refreshedCookie, unb);
 
             control.sideEffectLock.lock();
             try {
@@ -223,7 +292,7 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
                     return;
                 }
                 boolean updated = accountService.updateAccountCookie(
-                        task.xianyuAccountId(), unb, refreshedCookie);
+                        task.xianyuAccountId(), unb, normalizedCookie);
                 if (!updated) {
                     complete(control, Status.FAILED, "验证完成，但凭证更新或重新连接失败");
                     return;
@@ -231,6 +300,9 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
             } finally {
                 control.sideEffectLock.unlock();
             }
+            updateProgress(control, new CaptchaBrowserRunner.ProgressUpdate(
+                    "VALIDATING_CREDENTIAL", "正在确认平台已放行新凭证",
+                    control.attempt, control.maxAttempts));
             control.sideEffectLock.lock();
             try {
                 if (!isCurrentActive(tasks.get(control.accountId), control)) {
@@ -240,7 +312,8 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
                 if (connected) {
                     complete(control, Status.SUCCEEDED, "验证完成，Cookie已更新并重新连接");
                 } else {
-                    complete(control, Status.FAILED, "验证完成，但凭证更新或重新连接失败");
+                    complete(control, Status.FAILED,
+                            credentialFailureMessage(pendingCaptchaUrl(task.xianyuAccountId())));
                 }
             } finally {
                 control.sideEffectLock.unlock();
@@ -272,6 +345,22 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
             return "滑块验证未完成";
         }
         return result.message();
+    }
+
+    private String pendingCaptchaUrl(Long accountId) {
+        try {
+            return tokenService.getPendingCaptchaUrl(accountId);
+        } catch (Exception e) {
+            log.warn("【账号{}】读取平台验证状态失败: {}", accountId,
+                    e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    static String credentialFailureMessage(String pendingCaptchaUrl) {
+        return pendingCaptchaUrl == null || pendingCaptchaUrl.isBlank()
+                ? "凭证已更新，但WebSocket重新连接失败"
+                : "滑块操作完成，但平台仍要求验证";
     }
 
     private void updateProgress(TaskControl control, CaptchaBrowserRunner.ProgressUpdate progress) {
@@ -358,13 +447,18 @@ public class CaptchaSolveServiceImpl implements CaptchaSolveService {
     private boolean complete(TaskControl control, Status status, String message) {
         long now = System.currentTimeMillis();
         AtomicBoolean completed = new AtomicBoolean();
+        String finalPhase = status == Status.FAILED
+                || status == Status.TIMEOUT
+                || status == Status.UNSUPPORTED
+                ? control.phase
+                : status.name();
         tasks.compute(control.accountId, (accountId, current) -> {
             if (!isCurrentActive(current, control)) {
                 return current;
             }
             completed.set(true);
             return new TaskView(accountId, current.mode(), status, message,
-                    status.name(), control.attempt, control.maxAttempts,
+                    finalPhase, control.attempt, control.maxAttempts,
                     current.startedAt(), now, current.deadlineAt(), now);
         });
         return completed.get();

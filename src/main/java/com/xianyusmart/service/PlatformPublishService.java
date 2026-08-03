@@ -10,6 +10,7 @@ import com.microsoft.playwright.options.WaitUntilState;
 import com.xianyusmart.config.PlaywrightManager;
 import com.xianyusmart.common.ResultObject;
 import com.xianyusmart.entity.MerchantResource;
+import com.xianyusmart.exception.RiskGuardBlockedException;
 import com.xianyusmart.utils.XianyuApiCallUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,6 +41,7 @@ public class PlatformPublishService {
     private final AccountService accountService;
     private final ObjectMapper objectMapper;
     private final XianyuApiCallUtils apiCallUtils;
+    private final RiskControlService riskControlService;
     private final ImageUploadService imageUploadService;
     private final GoodsInfoService goodsInfoService;
     private final PlatformMarketplaceParser responseParser;
@@ -49,12 +51,14 @@ public class PlatformPublishService {
                                   AccountService accountService,
                                   ObjectMapper objectMapper,
                                   XianyuApiCallUtils apiCallUtils,
+                                  RiskControlService riskControlService,
                                   ImageUploadService imageUploadService,
                                   GoodsInfoService goodsInfoService) {
         this.playwrightManager = playwrightManager;
         this.accountService = accountService;
         this.objectMapper = objectMapper;
         this.apiCallUtils = apiCallUtils;
+        this.riskControlService = riskControlService;
         this.imageUploadService = imageUploadService;
         this.goodsInfoService = goodsInfoService;
         this.responseParser = new PlatformMarketplaceParser(objectMapper);
@@ -100,6 +104,8 @@ public class PlatformPublishService {
 
         Map<String, Object> publishData = buildPublishData(
                 title, description, material.getAmount(), material.getStock(), cdnImages, category, platformAddress);
+        // 图片上传不单独限流，最终提交前只获取一次完整发布额度。
+        requirePermit(accountId, RiskControlService.WriteOperation.ITEM_PUBLISH);
         XianyuApiCallUtils.ApiCallResult publishResult = apiCallUtils.callApiWithRetry(
                 accountId, "mtop.idle.pc.idleitem.publish", publishData, cookieText);
         if (!publishResult.isSuccess()) {
@@ -186,6 +192,8 @@ public class PlatformPublishService {
         if (cookieText == null || cookieText.isBlank()) {
             throw new IllegalStateException("账号Cookie不可用");
         }
+        // 删除内部的下架和删除共享一次额度，避免第二个接口被本地护栏拦截。
+        requirePermit(accountId, RiskControlService.WriteOperation.ITEM_DELETE);
         XianyuApiCallUtils.ApiCallResult offShelfResult = apiCallUtils.callApiWithRetry(
                 accountId, "mtop.taobao.idle.item.downshelf", "2.0",
                 Map.of("itemId", goodsId), cookieText, null, null);
@@ -209,6 +217,7 @@ public class PlatformPublishService {
         if (cookieText == null || cookieText.isBlank()) {
             throw new IllegalStateException("账号 Cookie 不可用");
         }
+        requirePermit(accountId, RiskControlService.WriteOperation.ITEM_STATUS);
         if (!onSale) {
             XianyuApiCallUtils.ApiCallResult result = apiCallUtils.callApiWithRetry(
                     accountId, "mtop.taobao.idle.item.downshelf", "2.0",
@@ -237,6 +246,13 @@ public class PlatformPublishService {
             }
             page.waitForTimeout(2000);
             return Map.of("success", true, "itemId", goodsId, "onSale", onSale);
+        }
+    }
+
+    private void requirePermit(Long accountId, RiskControlService.WriteOperation operation) {
+        RiskControlService.GuardDecision decision = riskControlService.tryAcquire(accountId, operation);
+        if (!decision.allowed()) {
+            throw new RiskGuardBlockedException(decision);
         }
     }
 
@@ -408,40 +424,76 @@ public class PlatformPublishService {
             ));
         }
         Map<String, Object> data = new LinkedHashMap<>();
-        data.put("title", title);
         data.put("description", description);
         data.put("imageInfos", imageInfos);
         data.put("lockCpv", false);
         data.put("multiSKU", false);
         data.put("publishScene", "mainPublish");
         data.put("scene", "newPublishChoice");
-        data.put("uniqueCode", String.valueOf(System.currentTimeMillis()));
-        XianyuApiCallUtils.ApiCallResult result = apiCallUtils.callApiWithRetry(
-                accountId,
-                "mtop.taobao.idle.kgraph.property.recommend",
-                "2.0",
-                data,
-                cookieText,
-                null,
-                Map.of("type", "originaljson", "spm_cnt", "a21ybx.publish.0.0")
-        );
-        if (!result.isSuccess()) {
-            throw new IllegalStateException("平台类目识别失败: " + result.getErrorMessage());
+        List<String> recommendationTexts = title.equals(description) ? List.of(title) : List.of(title, description);
+        Map<String, Object> category = Map.of();
+        for (String recommendationText : recommendationTexts) {
+            // AI标题未命中类目时按平台发布页使用完整详情重试一次，保留正常请求的性能。
+            data.put("title", recommendationText);
+            data.put("uniqueCode", String.valueOf(System.currentTimeMillis()));
+            XianyuApiCallUtils.ApiCallResult result = apiCallUtils.callApiWithRetry(
+                    accountId,
+                    "mtop.taobao.idle.kgraph.property.recommend",
+                    "2.0",
+                    data,
+                    cookieText,
+                    null,
+                    Map.of("type", "originaljson", "spm_cnt", "a21ybx.publish.0.0")
+            );
+            if (!result.isSuccess()) {
+                throw new IllegalStateException("平台类目识别失败: " + result.getErrorMessage());
+            }
+            Map<String, Object> response = readData(result.getResponse());
+            Map<String, Object> responseData = map(response.get("data"));
+            category = findCategory(responseData.get("categoryPredictResult"));
+            if (category.isEmpty()) {
+                category = findCategory(responseData);
+            }
+            if (!firstValue(category, "catId", "cid", "categoryId").isBlank()) {
+                break;
+            }
         }
-        Map<String, Object> response = readData(result.getResponse());
-        Map<String, Object> responseData = map(response.get("data"));
-        Object prediction = responseData.get("categoryPredictResult");
-        Map<String, Object> category = prediction instanceof List<?> list && !list.isEmpty()
-                ? map(list.get(0)) : map(prediction);
-        if (text(category.get("catId")).isBlank()) {
+        String catId = firstValue(category, "catId", "cid", "categoryId");
+        if (catId.isBlank()) {
             throw new IllegalStateException("平台未返回可发布类目，请调整标题和详情后重试");
         }
         return Map.of(
-                "catId", text(category.get("catId")),
-                "catName", text(category.get("catName")),
-                "channelCatId", text(category.get("channelCatId")),
-                "tbCatId", text(category.get("tbCatId"))
+                "catId", catId,
+                "catName", firstValue(category, "catName", "categoryName", "name"),
+                "channelCatId", firstValue(category, "channelCatId", "channelCid"),
+                "tbCatId", firstValue(category, "tbCatId", "tbCid")
         );
+    }
+
+    private Map<String, Object> findCategory(Object value) {
+        if (value instanceof List<?> values) {
+            for (Object child : values) {
+                Map<String, Object> category = findCategory(child);
+                if (!category.isEmpty()) {
+                    return category;
+                }
+            }
+            return Map.of();
+        }
+        Map<String, Object> current = map(value);
+        if (current.isEmpty()) {
+            return Map.of();
+        }
+        if (!firstValue(current, "catId", "cid", "categoryId").isBlank()) {
+            return current;
+        }
+        for (Object child : current.values()) {
+            Map<String, Object> category = findCategory(child);
+            if (!category.isEmpty()) {
+                return category;
+            }
+        }
+        return Map.of();
     }
 
     private Map<String, Object> resolveAddress(Long accountId, String cookieText,

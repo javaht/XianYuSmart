@@ -26,11 +26,10 @@ COPY .mvn/ .mvn/
 COPY mvnw mvnw.cmd pom.xml ./
 RUN chmod +x mvnw
 
-# 复制前端构建产物到 static 目录
-COPY --from=frontend-build /app/vue-code/../src/main/resources/static src/main/resources/static/
-
 # 复制后端源码
 COPY src/ src/
+# 复制前端构建产物到 static 目录
+COPY --from=frontend-build /app/vue-code/../src/main/resources/static src/main/resources/static/
 # 行政区划数据由Maven作为后端资源打包。
 COPY vue-code/src/data/ vue-code/src/data/
 
@@ -46,7 +45,7 @@ FROM eclipse-temurin:21-jre-jammy
 
 LABEL org.opencontainers.image.title="XianYuSmart"
 LABEL org.opencontainers.image.description="多租户闲鱼虚拟商品运营平台"
-LABEL org.opencontainers.image.version="2.0.3"
+LABEL org.opencontainers.image.version="2.0.4"
 LABEL org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0"
 
 WORKDIR /app
@@ -67,7 +66,7 @@ RUN groupadd --system xianyusmart && useradd --system --gid xianyusmart --home-d
     && chown -R xianyusmart:xianyusmart /app
 
 # 从构建阶段复制 JAR
-COPY --from=backend-build --chown=xianyusmart:xianyusmart /app/target/xianyusmart-2.0.3.jar app.jar
+COPY --from=backend-build --chown=xianyusmart:xianyusmart /app/target/xianyusmart-2.0.4.jar app.jar
 COPY --from=backend-build --chown=xianyusmart:xianyusmart /ms-playwright /app/ms-playwright
 
 # 暴露端口

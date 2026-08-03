@@ -6,10 +6,12 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.ElementHandle;
 import com.microsoft.playwright.Frame;
 import com.microsoft.playwright.JSHandle;
+import com.microsoft.playwright.Mouse;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.options.BoundingBox;
 import com.microsoft.playwright.options.Cookie;
+import com.microsoft.playwright.options.ScreenshotType;
 import com.microsoft.playwright.options.WaitUntilState;
 import com.xianyusmart.service.CaptchaSolveService;
 import com.xianyusmart.utils.XianyuSignUtils;
@@ -19,15 +21,19 @@ import org.springframework.stereotype.Component;
 import java.awt.GraphicsEnvironment;
 import java.lang.reflect.Field;
 import java.net.URI;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
@@ -39,10 +45,16 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
 
     private static final long TASK_TIMEOUT_MS = TimeUnit.MINUTES.toMillis(5);
     private static final int MAX_AUTO_ATTEMPTS = 5;
+    private static final int VIEWPORT_WIDTH = 1365;
+    private static final int VIEWPORT_HEIGHT = 768;
+    private static final long MANUAL_FRAME_INTERVAL_MS = 700;
+    private static final String GOOFISH_HOME_URL = "https://www.goofish.com";
+    private static final String COOKIE_EXPIRED_MESSAGE =
+            "Cookie Session已过期，请重新扫码登录后再连接";
     private final Map<Long, BrowserProcessSession> activeBrowserSessions = new ConcurrentHashMap<>();
-    private static final String USER_AGENT =
+    private static final String USER_AGENT_TEMPLATE =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    + "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+                    + "(KHTML, like Gecko) Chrome/%s.0.0.0 Safari/537.36";
     private static final List<String> COOKIE_URLS = List.of(
             "https://www.goofish.com/im",
             "https://passport.goofish.com",
@@ -57,6 +69,8 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
             "#nc_1_n1z .icon",
             ".btn_slide > i",
             "#aliyunCaptcha-sliding-slider",
+            "#scratch-captcha-btn",
+            ".scratch-captcha-slider .button",
             "#nc_1_n1z[style]",
             ".J_MIDDLEWARE_FRAME .btn_slide",
             "span.nc_iconfont",
@@ -74,11 +88,55 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
             ".slide-verify-track",
             ".slider-track",
             ".baxia-slider-track",
+            ".scratch-captcha-slider",
+            "#nc_1_n1t",
+            "[class*='scale']",
             "[class*='track']");
+    private static final List<String> CAPTCHA_CONTAINER_SELECTORS = List.of(
+            "#nc_1_wrapper",
+            "#nc_1",
+            "#nocaptcha",
+            ".nc-container",
+            ".nc_wrapper",
+            "#baxia-dialog",
+            ".J_MIDDLEWARE_FRAME",
+            "#scratch-captcha",
+            ".scratch-captcha-slider",
+            "[class*='captcha']");
+    private static final List<String> SCRATCH_CAPTCHA_SELECTORS = List.of(
+            "#scratch-captcha",
+            "#scratch-captcha-btn",
+            ".scratch-captcha-slider");
+    // 仅匹配滑块状态类，避免把静态成功文案误判为已通过。
     private static final List<String> SUCCESS_SELECTORS = List.of(
-            ".nc-lang-cnt[data-nc-lang='_yesTEXT']",
-            "[class*='verify-success']",
-            "text=验证通过");
+            ".nc_ok",
+            "#nc_1_n1z.success",
+            ".nc_wrapper .icon-success",
+            "#baxia-dialog .icon-success",
+            ".slide-verify .verify-success");
+    private static final List<String> FAILURE_SELECTORS = List.of(
+            ".nc_error",
+            ".errloading",
+            "#nc_1_refresh1",
+            ".fail");
+    private static final String MESSAGE_ENTRY_SCRIPT = """
+            () => {
+              const candidates = Array.from(document.querySelectorAll(
+                '[class*="sidebar-item-wrap"], a[href*="/im"], [role="button"]'
+              ));
+              const target = candidates.find(element => {
+                const text = (element.textContent || '').replace(/\\s+/g, '').trim();
+                const href = element.getAttribute('href') || '';
+                return href.includes('/im') || text === '消息'
+                  || (text.includes('消息') && text.length <= 8);
+              });
+              if (!target) {
+                return false;
+              }
+              target.click();
+              return true;
+            }
+            """;
     private static final String FINGERPRINT_SCRIPT = """
             (() => {
               try {
@@ -285,12 +343,9 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         if (!isAllowedCaptchaUrl(captchaUrl)) {
             return new RunResult(Outcome.FAILED, null, "验证地址不受支持");
         }
-        if (mode == CaptchaSolveService.Mode.MANUAL_BROWSER && !hasInteractiveDesktop()) {
-            return new RunResult(Outcome.UNSUPPORTED, null,
-                    "当前部署环境无法显示浏览器，请改用粘贴Cookie");
-        }
 
         boolean automatic = mode == CaptchaSolveService.Mode.AUTO;
+        boolean headless = automatic || !hasInteractiveDesktop();
         BrowserProcessSession processSession = new BrowserProcessSession();
         if (activeBrowserSessions.putIfAbsent(accountId, processSession) != null) {
             return new RunResult(Outcome.FAILED, null, "该账号已有浏览器验证任务");
@@ -301,32 +356,30 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         }
         reportProgress(progress, "STARTING_BROWSER", "正在启动浏览器", 0);
         Playwright playwright = null;
+        String failureStage = "启动浏览器";
         try {
+            failureStage = "创建浏览器进程";
             playwright = Playwright.create();
-            Browser browser = chromiumAfterProcessAttached(playwright, processSession).launch(
-                     new BrowserType.LaunchOptions()
-                             .setHeadless(automatic)
-                             .setIgnoreDefaultArgs(List.of("--enable-automation"))
-                             .setArgs(List.of(
-                                     "--disable-blink-features=AutomationControlled",
-                                     "--disable-infobars",
-                                     "--disable-dev-shm-usage",
-                                     "--no-first-run",
-                                     "--no-default-browser-check")));
+            BrowserType browserType = chromiumAfterProcessAttached(playwright, processSession);
+            failureStage = "启动浏览器";
+            Browser browser = browserType.launch(browserLaunchOptions(browserType, headless));
+            failureStage = "创建浏览器上下文";
             BrowserContext context = browser.newContext(
                      new Browser.NewContextOptions()
-                             .setUserAgent(USER_AGENT)
+                             .setUserAgent(browserUserAgent(browser.version()))
                              .setLocale("zh-CN")
                              .setTimezoneId("Asia/Shanghai")
-                             .setViewportSize(1365, 768));
+                             .setViewportSize(VIEWPORT_WIDTH, VIEWPORT_HEIGHT));
             context.setDefaultTimeout(10_000);
-            if (automatic) {
-                // 自动模式在页面脚本执行前统一浏览器指纹，避免同一上下文暴露互相矛盾的特征。
+            if (automatic || headless) {
+                // 无桌面浏览器复用现有环境配置，保证人工画面与自动模式使用同一页面上下文。
                 applyFingerprint(context);
             }
+            failureStage = "加载账号Cookie";
             context.addCookies(buildBrowserCookies(cookieText));
 
             reportProgress(progress, "OPENING_PAGE", "正在打开滑块验证页面", 0);
+            failureStage = "打开滑块验证页面";
             Page page = context.newPage();
             page.navigate(captchaUrl, new Page.NavigateOptions()
                     .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
@@ -336,28 +389,30 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
             }
 
             long deadline = System.currentTimeMillis() + TASK_TIMEOUT_MS;
+            failureStage = automatic ? "执行自动拖动" : "等待人工拖动";
             RunResult verificationResult = automatic
-                    ? runAutomatic(page, deadline, progress)
-                    : waitForManual(page, deadline, progress);
+                    ? runAutomatic(context, page, deadline, progress)
+                    : waitForManual(page, processSession, deadline, progress);
             if (verificationResult.outcome() != Outcome.SOLVED) {
                 return verificationResult;
             }
 
             reportProgress(progress, "COLLECTING_COOKIE", "正在回收更新后的Cookie", 0);
-            page.waitForTimeout(800);
+            failureStage = "回收更新后的Cookie";
+            List<Page> activePages = context.pages();
+            if (!activePages.isEmpty()) {
+                activePages.get(activePages.size() - 1).waitForTimeout(800);
+            }
             String refreshedCookie = buildCookieText(context.cookies(COOKIE_URLS), cookieText);
             if (refreshedCookie.isBlank()) {
                 return new RunResult(Outcome.FAILED, null, "验证完成但浏览器未返回Cookie");
             }
             return new RunResult(Outcome.SOLVED, refreshedCookie, "滑块验证完成");
         } catch (Exception e) {
-            log.warn("【账号{}】浏览器滑块验证失败: {}", accountId,
-                    e.getClass().getSimpleName());
-            if (!automatic && isDisplayFailure(e)) {
-                return new RunResult(Outcome.UNSUPPORTED, null,
-                        "浏览器窗口无法显示，请改用粘贴Cookie");
-            }
-            return new RunResult(Outcome.FAILED, null, "浏览器滑块验证失败");
+            String failureMessage = browserFailureMessage(failureStage, e);
+            log.warn("【账号{}】浏览器滑块验证失败: type={}, reason={}", accountId,
+                    e.getClass().getSimpleName(), failureMessage);
+            return new RunResult(Outcome.FAILED, null, failureMessage);
         } finally {
             // 先终止独立进程再关闭管道，避免关闭阻塞并回收Playwright传输线程。
             processSession.terminate();
@@ -373,6 +428,34 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         }
     }
 
+    static String browserFailureMessage(String stage, Exception exception) {
+        String rawMessage = exception == null ? null : exception.getMessage();
+        String normalized = rawMessage == null ? "" : rawMessage
+                .replaceAll("https?://\\S+", "验证地址")
+                .replaceAll("(?i)(cookie|token|authorization)[=:]\\S+", "$1=<redacted>")
+                .replaceAll("\\s+", " ")
+                .trim();
+        String lowerMessage = normalized.toLowerCase(Locale.ROOT);
+        String reason;
+        if (lowerMessage.contains("net::err_")) {
+            reason = "验证页面网络请求失败";
+        } else if (lowerMessage.contains("target page")
+                && lowerMessage.contains("has been closed")) {
+            reason = "验证页面已关闭";
+        } else if (lowerMessage.contains("timeout") || lowerMessage.contains("timed out")) {
+            reason = "验证页面响应超时";
+        } else if (lowerMessage.contains("executable doesn't exist")) {
+            reason = "浏览器运行文件缺失";
+        } else if (normalized.isBlank()) {
+            reason = exception == null ? "未知异常" : exception.getClass().getSimpleName();
+        } else {
+            reason = normalized.length() > 160
+                    ? normalized.substring(0, 160) + "..."
+                    : normalized;
+        }
+        return stage + "失败：" + reason;
+    }
+
     @Override
     public void cancel(Long accountId) {
         BrowserProcessSession processSession = activeBrowserSessions.get(accountId);
@@ -381,10 +464,54 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         }
     }
 
+    @Override
+    public CaptchaSolveService.ManualFrame getManualFrame(Long accountId) {
+        BrowserProcessSession processSession = activeBrowserSessions.get(accountId);
+        return processSession == null ? null : processSession.manualFrame;
+    }
+
+    @Override
+    public void submitManualDrag(Long accountId, CaptchaSolveService.ManualDrag drag) {
+        validateManualDrag(drag);
+        BrowserProcessSession processSession = activeBrowserSessions.get(accountId);
+        if (processSession == null || processSession.manualFrame == null) {
+            throw new IllegalStateException("人工浏览器尚未准备完成");
+        }
+        long currentVersion = processSession.manualFrame.version();
+        if (drag.frameVersion() > currentVersion || currentVersion - drag.frameVersion() > 5) {
+            throw new IllegalStateException("浏览器画面已更新，请重新拖动");
+        }
+        if (!processSession.manualDrags.offer(drag)) {
+            throw new IllegalStateException("上一次拖动正在执行");
+        }
+    }
+
     private BrowserType chromiumAfterProcessAttached(
             Playwright playwright, BrowserProcessSession processSession) {
         processSession.attach(playwright);
         return playwright.chromium();
+    }
+
+    private BrowserType.LaunchOptions browserLaunchOptions(BrowserType browserType, boolean headless) {
+        return new BrowserType.LaunchOptions()
+                // 显式使用完整Chromium，避免默认headless shell暴露不同的浏览器特征。
+                .setExecutablePath(Path.of(browserType.executablePath()))
+                .setHeadless(headless)
+                .setIgnoreDefaultArgs(List.of("--enable-automation"))
+                .setArgs(List.of(
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars",
+                        "--disable-dev-shm-usage",
+                        "--no-first-run",
+                        "--no-default-browser-check"));
+    }
+
+    private static String browserUserAgent(String browserVersion) {
+        String majorVersion = browserVersion == null ? "" : browserVersion.split("\\.", 2)[0];
+        if (!majorVersion.matches("\\d+")) {
+            majorVersion = "146";
+        }
+        return USER_AGENT_TEMPLATE.formatted(majorVersion);
     }
 
     void applyFingerprint(BrowserContext context) {
@@ -490,37 +617,109 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         return Math.max(180, Math.min(360, trackWidth - handleWidth));
     }
 
+    static double calculateDistance(double trackWidth, double handleWidth,
+                                    boolean scratchCaptcha, double scratchRatio) {
+        double availableDistance = Math.max(0, trackWidth - handleWidth);
+        if (scratchCaptcha) {
+            return availableDistance * Math.max(0.25, Math.min(0.35, scratchRatio));
+        }
+        return calculateDistance(trackWidth, handleWidth);
+    }
+
+    static void validateManualDrag(CaptchaSolveService.ManualDrag drag) {
+        if (drag == null || drag.frameVersion() <= 0
+                || drag.points() == null || drag.points().size() < 2
+                || drag.points().size() > 200) {
+            throw new IllegalArgumentException("拖动轨迹无效");
+        }
+        long previousElapsed = -1;
+        for (CaptchaSolveService.DragPoint point : drag.points()) {
+            if (point == null || !Double.isFinite(point.x()) || !Double.isFinite(point.y())
+                    || point.x() < 0 || point.x() > 1 || point.y() < 0 || point.y() > 1
+                    || point.elapsedMs() < previousElapsed || point.elapsedMs() > 10_000) {
+                throw new IllegalArgumentException("拖动轨迹无效");
+            }
+            previousElapsed = point.elapsedMs();
+        }
+    }
+
+    static boolean isScratchCaptchaText(String content) {
+        if (content == null || content.isBlank()) {
+            return false;
+        }
+        String normalized = content.toLowerCase(Locale.ROOT);
+        return normalized.contains("scratch-captcha")
+                || normalized.contains("scratch captcha")
+                || content.contains("刮刮乐");
+    }
+
+    static String sliderMissingMessage(boolean captchaContainerSeen) {
+        return captchaContainerSeen
+                ? "验证组件已出现，但滑块按钮未加载"
+                : "未识别到可拖动滑块";
+    }
+
     private static boolean isDomain(String host, String rootDomain) {
         return host.equals(rootDomain) || host.endsWith("." + rootDomain);
     }
 
-    RunResult runAutomatic(Page page, long deadline, Consumer<ProgressUpdate> progress) {
+    RunResult runAutomatic(BrowserContext context, Page page, long deadline,
+                           Consumer<ProgressUpdate> progress) {
         boolean captchaSeen = false;
         for (int attempt = 1; attempt <= MAX_AUTO_ATTEMPTS
                 && System.currentTimeMillis() < deadline; attempt++) {
             reportProgress(progress, "FINDING_SLIDER",
                     "第" + attempt + "次：正在识别滑块", attempt);
-            SliderTarget target = waitForSlider(page, Math.min(deadline, System.currentTimeMillis() + 12_000));
+            SliderWaitResult sliderWait = waitForSlider(
+                    page, Math.min(deadline, System.currentTimeMillis() + 12_000),
+                    progress, attempt);
+            SliderTarget target = sliderWait.target();
             if (target == null) {
+                if (isLoginPage(page)) {
+                    return new RunResult(Outcome.FAILED, null, COOKIE_EXPIRED_MESSAGE);
+                }
                 if (hasSuccessSignal(page) || (captchaSeen && !isCaptchaVisible(page))) {
                     return new RunResult(Outcome.SOLVED, null, "滑块验证完成");
                 }
-                return new RunResult(Outcome.FAILED, null, "未识别到可拖动滑块");
+                return new RunResult(Outcome.FAILED, null,
+                        sliderMissingMessage(sliderWait.captchaContainerSeen()));
             }
             captchaSeen = true;
 
             reportProgress(progress, "DRAGGING_SLIDER",
                     "第" + attempt + "次：正在拖动滑块", attempt);
-            if (!dragSlider(page, target, attempt)) {
+            if (!dragSlider(page, target, attempt, sliderWait.scratchCaptcha())) {
                 page.waitForTimeout(500);
                 continue;
             }
             reportProgress(progress, "WAITING_RESULT",
                     "第" + attempt + "次：正在等待验证结果", attempt);
             if (waitForCaptchaGone(page, Math.min(deadline, System.currentTimeMillis() + 10_000))) {
+                if (isLoginPage(page)) {
+                    return new RunResult(Outcome.FAILED, null, COOKIE_EXPIRED_MESSAGE);
+                }
                 return new RunResult(Outcome.SOLVED, null, "滑块验证完成");
             }
-            page.waitForTimeout(ThreadLocalRandom.current().nextInt(700, 1_301));
+            if (isLoginPage(page)) {
+                return new RunResult(Outcome.FAILED, null, COOKIE_EXPIRED_MESSAGE);
+            }
+            if (attempt < MAX_AUTO_ATTEMPTS) {
+                String failureReason = failureReason(page);
+                String retryMessage = failureReason == null
+                        ? "第" + attempt + "次未通过，正在重置滑块"
+                        : "第" + attempt + "次未通过：" + failureReason + "，正在重置滑块";
+                reportProgress(progress, "RETRYING_SLIDER",
+                        retryMessage, attempt);
+                reportProgress(progress, "RESETTING_SESSION",
+                        "第" + attempt + "次：正在从首页重新打开消息页", attempt);
+                // 同页重试会累积平台失败态，从首页重新进入消息页生成新验证会话。
+                ReopenResult reopenResult = reopenFromHome(context, page, deadline);
+                if (reopenResult.page() == null) {
+                    return new RunResult(Outcome.FAILED, null, reopenResult.message());
+                }
+                page = reopenResult.page();
+                captchaSeen = false;
+            }
         }
         if (System.currentTimeMillis() >= deadline) {
             return new RunResult(Outcome.TIMEOUT, null, "滑块验证超时");
@@ -528,22 +727,89 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         return new RunResult(Outcome.FAILED, null, "自动拖动未通过验证");
     }
 
-    private RunResult waitForManual(Page page, long deadline, Consumer<ProgressUpdate> progress) {
-        reportProgress(progress, "WAITING_MANUAL", "浏览器已打开，请人工完成滑块", 0);
+    private RunResult waitForManual(Page page, BrowserProcessSession processSession,
+                                    long deadline, Consumer<ProgressUpdate> progress) {
+        reportProgress(progress, "CAPTURING_MANUAL_FRAME",
+                "正在同步服务器验证画面", 0);
         boolean captchaSeen = false;
+        long lastFrameAt = 0;
         while (System.currentTimeMillis() < deadline) {
+            if (isLoginPage(page)) {
+                return new RunResult(Outcome.FAILED, null, COOKIE_EXPIRED_MESSAGE);
+            }
             if (hasSuccessSignal(page)) {
                 return new RunResult(Outcome.SOLVED, null, "滑块验证完成");
             }
             SliderTarget target = findSlider(page);
             if (target != null) {
                 captchaSeen = true;
-            } else if (captchaSeen) {
+            } else if (captchaSeen && !isCaptchaContainerVisible(page)) {
                 return new RunResult(Outcome.SOLVED, null, "滑块验证完成");
             }
-            page.waitForTimeout(500);
+            long now = System.currentTimeMillis();
+            if (now - lastFrameAt >= MANUAL_FRAME_INTERVAL_MS) {
+                captureManualFrame(page, processSession);
+                lastFrameAt = now;
+                reportProgress(progress, "WAITING_MANUAL",
+                        "服务器画面已同步，请在画面中拖动滑块", 0);
+            }
+            CaptchaSolveService.ManualDrag drag = processSession.manualDrags.peek();
+            if (drag != null) {
+                try {
+                    reportProgress(progress, "REPLAYING_MANUAL_DRAG",
+                            "正在服务器浏览器中执行拖动", 0);
+                    replayManualDrag(page, drag);
+                    if (waitForCaptchaGone(page,
+                            Math.min(deadline, System.currentTimeMillis() + 10_000))) {
+                        return new RunResult(Outcome.SOLVED, null, "滑块验证完成");
+                    }
+                } finally {
+                    // 执行完成前保留队列元素，阻止同一浏览器并发接收第二条轨迹。
+                    processSession.manualDrags.poll();
+                }
+                reportProgress(progress, "CAPTURING_MANUAL_FRAME",
+                        "平台未放行，正在同步最新验证画面", 0);
+                lastFrameAt = 0;
+            }
+            page.waitForTimeout(100);
         }
         return new RunResult(Outcome.TIMEOUT, null, "人工滑块验证超时");
+    }
+
+    private void captureManualFrame(Page page, BrowserProcessSession processSession) {
+        byte[] image = page.screenshot(new Page.ScreenshotOptions()
+                .setType(ScreenshotType.JPEG)
+                .setQuality(60));
+        long version = processSession.frameVersion.incrementAndGet();
+        processSession.manualFrame = new CaptchaSolveService.ManualFrame(
+                version, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, System.currentTimeMillis(),
+                Base64.getEncoder().encodeToString(image));
+    }
+
+    private void replayManualDrag(Page page, CaptchaSolveService.ManualDrag drag) {
+        List<CaptchaSolveService.DragPoint> points = drag.points();
+        CaptchaSolveService.DragPoint first = points.getFirst();
+        Mouse mouse = page.mouse();
+        boolean mouseDown = false;
+        try {
+            mouse.move(first.x() * VIEWPORT_WIDTH, first.y() * VIEWPORT_HEIGHT);
+            mouse.down();
+            mouseDown = true;
+            long previousElapsed = first.elapsedMs();
+            for (int index = 1; index < points.size(); index++) {
+                CaptchaSolveService.DragPoint point = points.get(index);
+                long delay = Math.min(120, Math.max(0, point.elapsedMs() - previousElapsed));
+                if (delay > 0) {
+                    page.waitForTimeout(delay);
+                }
+                mouse.move(point.x() * VIEWPORT_WIDTH, point.y() * VIEWPORT_HEIGHT);
+                previousElapsed = point.elapsedMs();
+            }
+        } finally {
+            if (mouseDown) {
+                mouse.up();
+            }
+        }
     }
 
     private void reportProgress(Consumer<ProgressUpdate> progress, String phase,
@@ -553,66 +819,308 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         }
     }
 
-    private SliderTarget waitForSlider(Page page, long deadline) {
+    private SliderWaitResult waitForSlider(Page page, long deadline,
+                                           Consumer<ProgressUpdate> progress, int attempt) {
+        boolean captchaContainerSeen = false;
+        long lastLoadingReportAt = 0;
         while (System.currentTimeMillis() < deadline) {
             if (hasSuccessSignal(page)) {
-                return null;
+                return new SliderWaitResult(null, captchaContainerSeen, false);
             }
             SliderTarget target = findSlider(page);
             if (target != null) {
-                return target;
+                return new SliderWaitResult(target, true, isScratchCaptcha(page));
+            }
+            if (isCaptchaContainerVisible(page)) {
+                captchaContainerSeen = true;
+                long now = System.currentTimeMillis();
+                if (now - lastLoadingReportAt >= 1_000) {
+                    reportProgress(progress, "WAITING_SLIDER",
+                            "第" + attempt + "次：验证组件已出现，正在等待滑块加载", attempt);
+                    lastLoadingReportAt = now;
+                }
             }
             page.waitForTimeout(250);
         }
-        return null;
+        return new SliderWaitResult(null, captchaContainerSeen, false);
     }
 
-    private boolean dragSlider(Page page, SliderTarget target, int attempt) {
+    private boolean dragSlider(Page page, SliderTarget target, int attempt,
+                               boolean scratchCaptcha) {
         BoundingBox handleBox = target.handle().boundingBox();
         if (handleBox == null) {
             return false;
         }
 
+        ThreadLocalRandom random = ThreadLocalRandom.current();
         double startX = handleBox.x + handleBox.width / 2;
         double startY = handleBox.y + handleBox.height / 2;
         BoundingBox trackBox = target.track() == null ? null : target.track().boundingBox();
+        double scratchRatio = random.nextDouble(0.25, 0.35);
         double distance = trackBox == null
-                ? 300
-                : calculateDistance(trackBox.width, handleBox.width);
-        double overshoot = ThreadLocalRandom.current().nextDouble(3, 8);
-        int steps = ThreadLocalRandom.current().nextInt(28, 39);
-
-        page.mouse().move(startX, startY);
-        page.waitForTimeout(ThreadLocalRandom.current().nextInt(80, 181));
-        page.mouse().down();
-        for (int index = 1; index <= steps; index++) {
-            double progress = (double) index / steps;
-            double eased = progress < 0.5
-                    ? 2 * progress * progress
-                    : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-            double x = startX + (distance + overshoot) * eased;
-            double jitter = Math.sin(progress * Math.PI * (2 + attempt % 2))
-                    * ThreadLocalRandom.current().nextDouble(0.4, 1.8);
-            double y = startY + jitter;
-            page.mouse().move(x, y);
-            if (index == steps / 2) {
-                page.mouse().move(x - ThreadLocalRandom.current().nextDouble(1, 3), y);
+                ? (scratchCaptcha ? 300 * scratchRatio : 300)
+                : calculateDistance(trackBox.width, handleBox.width, scratchCaptcha,
+                        scratchRatio);
+        int stepsBase;
+        int delayMin;
+        int delayMax;
+        boolean pauseDuringDrag = false;
+        switch (attempt) {
+            case 1 -> {
+                stepsBase = 30;
+                delayMin = 20;
+                delayMax = 50;
             }
-            if (index % 8 == 0) {
-                page.waitForTimeout(ThreadLocalRandom.current().nextInt(12, 41));
+            case 2 -> {
+                stepsBase = 35;
+                delayMin = 30;
+                delayMax = 70;
+            }
+            case 3 -> {
+                stepsBase = 25;
+                delayMin = 15;
+                delayMax = 40;
+            }
+            case 4 -> {
+                stepsBase = 40;
+                delayMin = 40;
+                delayMax = 90;
+                pauseDuringDrag = true;
+            }
+            default -> {
+                stepsBase = 30 + random.nextInt(15);
+                delayMin = 20 + random.nextInt(30);
+                delayMax = delayMin + 30 + random.nextInt(40);
             }
         }
-        page.waitForTimeout(ThreadLocalRandom.current().nextInt(50, 121));
-        page.mouse().move(startX + distance, startY + ThreadLocalRandom.current().nextDouble(-0.8, 0.8));
-        page.waitForTimeout(ThreadLocalRandom.current().nextInt(30, 91));
-        page.mouse().up();
-        return true;
+        int steps = stepsBase + random.nextInt(15);
+        double actualStartX = startX + random.nextDouble(-4, 4);
+        double actualStartY = startY + random.nextDouble(-3, 3);
+        double approachAngle = random.nextDouble(0, Math.PI * 2);
+        double approachDistance = random.nextDouble(40, 120);
+        double approachX = actualStartX + Math.cos(approachAngle) * approachDistance;
+        double approachY = actualStartY + Math.sin(approachAngle) * approachDistance;
+        Mouse mouse = page.mouse();
+        boolean mouseDown = false;
+        try {
+            // 先自然接近滑块再按下，避免鼠标瞬移到固定中心点。
+            mouse.move(approachX, approachY, new Mouse.MoveOptions().setSteps(8));
+            page.waitForTimeout(random.nextInt(80, 201));
+            int approachSteps = random.nextInt(3, 6);
+            for (int index = 1; index <= approachSteps; index++) {
+                double progress = (double) index / approachSteps;
+                double eased = progress * progress * (3 - 2 * progress);
+                mouse.move(
+                        approachX + (actualStartX - approachX) * eased,
+                        approachY + (actualStartY - approachY) * eased,
+                        new Mouse.MoveOptions().setSteps(5));
+                page.waitForTimeout(random.nextInt(12, 38));
+            }
+            page.waitForTimeout(random.nextInt(100, 251));
+            mouse.down();
+            mouseDown = true;
+            page.waitForTimeout(random.nextInt(80, 181));
+            mouse.move(
+                    actualStartX + random.nextDouble(-1.5, 1.5),
+                    actualStartY + random.nextDouble(-1.5, 1.5),
+                    new Mouse.MoveOptions().setSteps(3));
+            page.waitForTimeout(random.nextInt(30, 81));
+
+            double pausePoint = random.nextDouble(0.3, 0.7);
+            boolean paused = false;
+            double lastX = actualStartX;
+            double lastY = actualStartY;
+            double arcDirection = random.nextBoolean() ? -1 : 1;
+            double arcAmplitude = random.nextDouble(3, 8);
+            for (int index = 1; index <= steps; index++) {
+                double progress = (double) index / steps;
+                double speedWeight;
+                if (progress < 0.2) {
+                    speedWeight = 1 - 0.7 * (progress / 0.2);
+                } else if (progress < 0.7) {
+                    speedWeight = 0.25 + 0.15 * Math.sin(progress * Math.PI * 4);
+                } else {
+                    speedWeight = 0.4 + 0.6 * ((progress - 0.7) / 0.3);
+                }
+                double poweredProgress = Math.pow(progress, 2.5);
+                double poweredRemaining = Math.pow(1 - progress, 2.5);
+                double eased = poweredProgress / (poweredProgress + poweredRemaining);
+                double x = actualStartX + distance * eased;
+                if (random.nextDouble() < 0.05 && index > 3 && index < steps - 3) {
+                    x = lastX - random.nextDouble(2, 5);
+                }
+                double arcOffset = arcDirection * arcAmplitude * Math.sin(Math.PI * progress);
+                double targetY = actualStartY + arcOffset;
+                double y = (lastY + random.nextDouble(-3, 3)) * 0.6 + targetY * 0.4;
+                mouse.move(x, y, new Mouse.MoveOptions().setSteps(3));
+                double medianDelay = delayMin + (delayMax - delayMin) * 0.4;
+                double logNormalDelay = medianDelay * Math.exp(0.5 * random.nextGaussian());
+                double baseDelay = Math.max(delayMin, Math.min(delayMax * 2, logNormalDelay));
+                page.waitForTimeout(Math.max(8, baseDelay * speedWeight));
+                lastX = x;
+                lastY = y;
+                if (pauseDuringDrag && !paused && progress >= pausePoint) {
+                    page.waitForTimeout(300);
+                    paused = true;
+                }
+            }
+
+            double overshoot = random.nextDouble(5, 13);
+            page.waitForTimeout(random.nextInt(30, 101));
+            mouse.move(
+                    actualStartX + distance + overshoot,
+                    actualStartY + random.nextDouble(-5, 5),
+                    new Mouse.MoveOptions().setSteps(4));
+            page.waitForTimeout(random.nextInt(50, 131));
+            mouse.move(
+                    actualStartX + distance,
+                    actualStartY + random.nextDouble(-3, 3),
+                    new Mouse.MoveOptions().setSteps(4));
+            int adjustments = random.nextDouble() < 0.7 ? 1 : 2;
+            for (int index = 0; index < adjustments; index++) {
+                page.waitForTimeout(random.nextInt(40, 101));
+                mouse.move(
+                        actualStartX + distance + random.nextDouble(-2, 2),
+                        actualStartY + random.nextDouble(-2, 2),
+                        new Mouse.MoveOptions().setSteps(2));
+            }
+            page.waitForTimeout(random.nextInt(50, 121));
+            mouse.up();
+            mouseDown = false;
+            return true;
+        } finally {
+            if (mouseDown) {
+                mouse.up();
+            }
+        }
+    }
+
+    private ReopenResult reopenFromHome(BrowserContext context, Page currentPage, long deadline) {
+        try {
+            try {
+                currentPage.evaluate("""
+                        () => {
+                          try { localStorage.clear(); } catch (ignored) {}
+                          try { sessionStorage.clear(); } catch (ignored) {}
+                        }
+                        """);
+            } catch (Exception ignored) {
+                // 页面正在切换时直接关闭旧会话。
+            }
+            currentPage.close();
+
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                return new ReopenResult(null, "重新打开消息页超时");
+            }
+            int navigationTimeout = (int) Math.max(1,
+                    Math.min(45_000, remaining));
+            Page homePage = context.newPage();
+            homePage.navigate(GOOFISH_HOME_URL, new Page.NavigateOptions()
+                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(navigationTimeout));
+            if (!waitWithinDeadline(homePage, deadline, 2_000)) {
+                return new ReopenResult(null, "重新打开消息页超时");
+            }
+            if (isLoginPage(homePage)) {
+                return new ReopenResult(null, COOKIE_EXPIRED_MESSAGE);
+            }
+
+            List<Page> pagesBeforeClick = new ArrayList<>(context.pages());
+            if (!clickMessageEntry(homePage)) {
+                return new ReopenResult(null, "未找到闲鱼消息入口，请稍后重试");
+            }
+            long popupDeadline = Math.min(deadline, System.currentTimeMillis() + 8_000);
+            while (System.currentTimeMillis() < popupDeadline) {
+                for (Page candidate : context.pages()) {
+                    if (pagesBeforeClick.contains(candidate) || candidate.isClosed()) {
+                        continue;
+                    }
+                    if (!waitWithinDeadline(candidate, deadline, 1_500)) {
+                        return new ReopenResult(null, "重新打开消息页超时");
+                    }
+                    if (isLoginPage(candidate)) {
+                        return new ReopenResult(null, COOKIE_EXPIRED_MESSAGE);
+                    }
+                    if (isMessagePageUrl(candidate.url())) {
+                        homePage.close();
+                        return new ReopenResult(candidate, null);
+                    }
+                    candidate.close();
+                }
+                if (isMessagePageUrl(homePage.url())) {
+                    if (!waitWithinDeadline(homePage, deadline, 1_500)) {
+                        return new ReopenResult(null, "重新打开消息页超时");
+                    }
+                    return isLoginPage(homePage)
+                            ? new ReopenResult(null, COOKIE_EXPIRED_MESSAGE)
+                            : new ReopenResult(homePage, null);
+                }
+                if (!waitWithinDeadline(homePage, popupDeadline, 250)) {
+                    break;
+                }
+            }
+            return new ReopenResult(null, "点击消息入口后未打开消息页，请稍后重试");
+        } catch (Exception e) {
+            return new ReopenResult(null, "重新打开消息页失败，请稍后重试");
+        }
+    }
+
+    private boolean waitWithinDeadline(Page page, long deadline, long maximumWait) {
+        long wait = Math.min(maximumWait, deadline - System.currentTimeMillis());
+        if (wait <= 0) {
+            return false;
+        }
+        page.waitForTimeout(wait);
+        return System.currentTimeMillis() < deadline;
+    }
+
+    private boolean clickMessageEntry(Page homePage) {
+        return Boolean.TRUE.equals(homePage.evaluate(MESSAGE_ENTRY_SCRIPT));
+    }
+
+    static boolean isMessagePageUrl(String value) {
+        try {
+            URI uri = URI.create(value);
+            String path = uri.getPath();
+            return uri.getHost() != null
+                    && isDomain(uri.getHost().toLowerCase(Locale.ROOT), "goofish.com")
+                    && ("/im".equals(path) || (path != null && path.startsWith("/im/")));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private boolean isLoginPage(Page page) {
+        String url = page.url().toLowerCase(Locale.ROOT);
+        if (url.contains("login.taobao.com") || url.contains("login.goofish.com")
+                || url.matches(".*(?:/login|/uilogin)(?:[/?#].*)?$")) {
+            return true;
+        }
+        try {
+            String bodyText = (String) page.evaluate(
+                    "() => document.body ? document.body.innerText : ''");
+            return isLoginBody(bodyText);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    static boolean isLoginBody(String bodyText) {
+        return bodyText != null
+                && bodyText.matches("(?s).*(扫码登录|手机号登录|账号密码登录).*");
     }
 
     private boolean waitForCaptchaGone(Page page, long deadline) {
         while (System.currentTimeMillis() < deadline) {
-            if (hasSuccessSignal(page) || !isCaptchaVisible(page)) {
+            if (hasSuccessSignal(page)) {
                 return true;
+            }
+            if (hasFailureSignal(page)) {
+                return false;
+            }
+            if (!isCaptchaVisible(page)) {
+                return !isLoginPage(page);
             }
             page.waitForTimeout(300);
         }
@@ -620,7 +1128,46 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
     }
 
     private boolean isCaptchaVisible(Page page) {
-        return findSlider(page) != null;
+        return findSlider(page) != null || isCaptchaContainerVisible(page);
+    }
+
+    private boolean isCaptchaContainerVisible(Page page) {
+        for (Frame frame : page.frames()) {
+            if (frame.isDetached()) {
+                continue;
+            }
+            try {
+                ElementHandle container = findVisibleElement(frame, CAPTCHA_CONTAINER_SELECTORS);
+                if (container != null) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // 验证组件刷新时继续检查其余页面上下文。
+            }
+        }
+        return false;
+    }
+
+    private boolean isScratchCaptcha(Page page) {
+        for (Frame frame : page.frames()) {
+            if (frame.isDetached()) {
+                continue;
+            }
+            try {
+                ElementHandle container = findVisibleElement(frame, SCRATCH_CAPTCHA_SELECTORS);
+                if (container != null) {
+                    return true;
+                }
+                String bodyText = (String) frame.evaluate(
+                        "() => document.body ? document.body.innerText : ''");
+                if (isScratchCaptchaText(bodyText)) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // 验证组件刷新时继续检查其余页面上下文。
+            }
+        }
+        return false;
     }
 
     boolean hasSuccessSignal(Page page) {
@@ -640,6 +1187,36 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
             }
         }
         return false;
+    }
+
+    private boolean hasFailureSignal(Page page) {
+        return failureReason(page) != null;
+    }
+
+    private String failureReason(Page page) {
+        for (Frame frame : page.frames()) {
+            if (frame.isDetached()) {
+                continue;
+            }
+            try {
+                for (String selector : FAILURE_SELECTORS) {
+                    ElementHandle failure = frame.querySelector(selector);
+                    if (failure != null && failure.isVisible()) {
+                        String text = failure.innerText();
+                        if (text == null || text.isBlank()) {
+                            return "平台返回验证失败";
+                        }
+                        String normalized = text.replaceAll("\\s+", " ").trim();
+                        return normalized.length() > 120
+                                ? normalized.substring(0, 120) + "..."
+                                : normalized;
+                    }
+                }
+            } catch (Exception ignored) {
+                // 页面切换时等待下一轮检查。
+            }
+        }
+        return null;
     }
 
     private List<Cookie> buildBrowserCookies(String cookieText) {
@@ -704,8 +1281,15 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
         return value != null && !value.isBlank();
     }
 
+    private record ReopenResult(Page page, String message) {
+    }
+
     private static final class BrowserProcessSession {
 
+        private final ArrayBlockingQueue<CaptchaSolveService.ManualDrag> manualDrags =
+                new ArrayBlockingQueue<>(1);
+        private final AtomicLong frameVersion = new AtomicLong();
+        private volatile CaptchaSolveService.ManualFrame manualFrame;
         private boolean cancelled;
         private ProcessHandle driverProcess;
 
@@ -756,6 +1340,10 @@ public class PlaywrightCaptchaBrowserRunner implements CaptchaBrowserRunner {
     }
 
     record SliderTarget(ElementHandle track, ElementHandle handle) {
+    }
+
+    private record SliderWaitResult(SliderTarget target, boolean captchaContainerSeen,
+                                    boolean scratchCaptcha) {
     }
 
 }
