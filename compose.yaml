@@ -4,7 +4,7 @@ services:
   app:
     build:
       context: .
-    image: ${APP_IMAGE:-xianyusmart:2.0.4}
+    image: ${APP_IMAGE:-xianyusmart:2.0.6}
     restart: unless-stopped
     environment:
       DB_URL: ${DB_URL:-jdbc:sqlite:/app/data/xianyusmart.db}

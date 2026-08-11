@@ -69,6 +69,14 @@ export function useAutoDelivery() {
   const skuList = ref<GoodsSku[]>([])
   const selectedSkuId = ref<string | null>(null)
   const skuConfigs = ref<Map<string, AutoDeliveryConfig>>(new Map())
+  const skuLoading = ref(false)
+  const skuLoadError = ref('')
+  const configLoading = ref(false)
+  const configLoadError = ref('')
+  const activeAccountId = ref<number | null>(null)
+  let skuRequestVersion = 0
+  let skuConfigRequestVersion = 0
+  let configRequestVersion = 0
 
   const goodsCurrentPage = ref(1)
   const goodsTotal = ref(0)
@@ -91,6 +99,38 @@ export function useAutoDelivery() {
     autoDeliveryImageUrl: '',
     autoConfirmShipment: 0
   })
+  const resetDeliveryConfigFields = () => {
+    configForm.value.deliveryMode = 1
+    configForm.value.fixedTemplateId = null
+    configForm.value.kamiConfigIds = ''
+    configForm.value.deliveryMessageTemplate = DEFAULT_DELIVERY_MESSAGE_TEMPLATE
+    configForm.value.voucherDeliveryEnabled = 1
+    configForm.value.chatDeliveryEnabled = 1
+    configForm.value.receiptFollowUpMessages = []
+    configForm.value.receiptFollowUpIntervalSeconds = 5
+    configForm.value.autoDeliveryImageUrl = ''
+  }
+  const savedConfigSnapshot = ref('')
+
+  const serializeConfig = () => JSON.stringify({
+    deliveryMode: configForm.value.deliveryMode,
+    fixedTemplateId: configForm.value.fixedTemplateId,
+    kamiConfigIds: configForm.value.kamiConfigIds,
+    deliveryMessageTemplate: configForm.value.deliveryMessageTemplate,
+    voucherDeliveryEnabled: configForm.value.voucherDeliveryEnabled,
+    chatDeliveryEnabled: configForm.value.chatDeliveryEnabled,
+    receiptFollowUpMessages: configForm.value.receiptFollowUpMessages,
+    receiptFollowUpIntervalSeconds: configForm.value.receiptFollowUpIntervalSeconds,
+    autoDeliveryImageUrl: configForm.value.autoDeliveryImageUrl
+  })
+
+  const hasUnsavedChanges = computed(() =>
+    savedConfigSnapshot.value !== '' && savedConfigSnapshot.value !== serializeConfig())
+  const confirmDiscardChanges = () => !hasUnsavedChanges.value
+    || window.confirm('当前规格的配置尚未保存，确定放弃修改吗？')
+  const markConfigSaved = () => { savedConfigSnapshot.value = serializeConfig() }
+  const isCurrentGoods = (accountId: number, goodsId: string) =>
+    selectedAccountId.value === accountId && selectedGoods.value?.item.xyGoodId === goodsId
 
   const kamiConfigOptions = ref<KamiConfig[]>([])
   const fixedTemplateOptions = ref<FixedDeliveryTemplate[]>([])
@@ -100,7 +140,9 @@ export function useAutoDelivery() {
     set: (val: string) => { configForm.value.kamiConfigIds = val }
   })
 
-  const hasMultipleSku = computed(() => skuList.value.length > 1)
+  const hasSku = computed(() => skuList.value.length > 0)
+  const configuredSkuCount = computed(() => skuList.value
+    .filter(sku => sku.skuId && skuConfigs.value.has(sku.skuId)).length)
   const hasFixedDelivery = computed(() => configForm.value.deliveryMode === 1)
   const hasCardDelivery = computed(() => configForm.value.deliveryMode === 2)
   const selectedFixedTemplate = computed(() =>
@@ -143,6 +185,7 @@ export function useAutoDelivery() {
   }
 
   const goToFixedTemplates = () => {
+    if (!confirmDiscardChanges()) return
     router.push({
       path: '/fixed-delivery-templates',
       query: selectedAccountId.value ? { accountId: String(selectedAccountId.value) } : {}
@@ -208,7 +251,15 @@ export function useAutoDelivery() {
     if (!isMobile.value) { mobileView.value = 'goods' }
   }
 
-  const goBackToGoods = () => { mobileView.value = 'goods' }
+  const goBackToGoods = () => {
+    if (confirmDiscardChanges()) mobileView.value = 'goods'
+  }
+
+  const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+    if (!hasUnsavedChanges.value) return
+    event.preventDefault()
+    event.returnValue = ''
+  }
 
   const formatTime = (time: string) => {
     if (!time) return '-'
@@ -250,6 +301,7 @@ export function useAutoDelivery() {
           const accountId = parseInt(accountIdFromQuery as string)
           if (accounts.value.some(acc => acc.id === accountId)) {
             selectedAccountId.value = accountId
+            activeAccountId.value = accountId
             await loadGoods()
             return
           }
@@ -257,6 +309,7 @@ export function useAutoDelivery() {
 
         if (accounts.value.length > 0 && !selectedAccountId.value) {
           selectedAccountId.value = accounts.value[0]?.id || null
+          activeAccountId.value = selectedAccountId.value
           await loadGoods()
         }
       }
@@ -337,8 +390,23 @@ export function useAutoDelivery() {
   }
 
   const handleAccountChange = () => {
+    if (!confirmDiscardChanges()) {
+      selectedAccountId.value = activeAccountId.value
+      return
+    }
+    activeAccountId.value = selectedAccountId.value
+    skuRequestVersion++
+    skuConfigRequestVersion++
+    configRequestVersion++
+    savedConfigSnapshot.value = ''
     selectedGoods.value = null
     currentConfig.value = null
+    skuList.value = []
+    selectedSkuId.value = null
+    skuLoadError.value = ''
+    configLoadError.value = ''
+    skuLoading.value = false
+    configLoading.value = false
     fixedTemplateOptions.value = []
     goodsCurrentPage.value = 1
     loadFixedTemplateOptions()
@@ -346,22 +414,32 @@ export function useAutoDelivery() {
   }
 
   const loadSkuList = async () => {
-    if (!selectedGoods.value) {
+    if (!selectedGoods.value || !selectedAccountId.value) {
       skuList.value = []
       return
     }
+    const accountId = selectedAccountId.value
+    const goodsId = selectedGoods.value.item.xyGoodId
+    const requestVersion = ++skuRequestVersion
+    skuLoading.value = true
+    skuLoadError.value = ''
     try {
-      const res = await getGoodsSkuList(selectedGoods.value.item.xyGoodId)
+      const res = await getGoodsSkuList(accountId, goodsId)
+      if (requestVersion !== skuRequestVersion || !isCurrentGoods(accountId, goodsId)) return
       if (res.code === 200 || res.code === 0) {
         skuList.value = (res.data || []).sort((a, b) => {
           if (a.propertySortOrder !== b.propertySortOrder) return (a.propertySortOrder ?? 0) - (b.propertySortOrder ?? 0)
           return (a.valueSortOrder ?? 0) - (b.valueSortOrder ?? 0)
         })
       } else {
-        skuList.value = []
+        throw new Error(res.msg || '获取商品规格失败')
       }
-    } catch {
+    } catch (error: any) {
+      if (requestVersion !== skuRequestVersion || !isCurrentGoods(accountId, goodsId)) return
       skuList.value = []
+      skuLoadError.value = error?.message || '商品规格加载失败，请重试'
+    } finally {
+      if (requestVersion === skuRequestVersion) skuLoading.value = false
     }
   }
 
@@ -370,11 +448,15 @@ export function useAutoDelivery() {
       skuConfigs.value = new Map()
       return
     }
+    const accountId = selectedAccountId.value
+    const goodsId = selectedGoods.value.item.xyGoodId
+    const requestVersion = ++skuConfigRequestVersion
     try {
       const res = await getAutoDeliveryConfigsByGoodsId({
-        xianyuAccountId: selectedAccountId.value,
-        xyGoodsId: selectedGoods.value.item.xyGoodId
+        xianyuAccountId: accountId,
+        xyGoodsId: goodsId
       })
+      if (requestVersion !== skuConfigRequestVersion || !isCurrentGoods(accountId, goodsId)) return
       if (res.code === 200 || res.code === 0) {
         const configs = res.data || []
         const map = new Map<string, AutoDeliveryConfig>()
@@ -384,28 +466,41 @@ export function useAutoDelivery() {
         })
         skuConfigs.value = map
       } else {
-        skuConfigs.value = new Map()
+        throw new Error(res.msg || '获取规格配置进度失败')
       }
-    } catch {
+    } catch (error: any) {
+      if (requestVersion !== skuConfigRequestVersion || !isCurrentGoods(accountId, goodsId)) return
       skuConfigs.value = new Map()
+      skuLoadError.value = error?.message || '规格配置进度加载失败，请重试'
     }
   }
 
   const selectGoods = async (goods: GoodsItemWithConfig) => {
+    if (selectedGoods.value?.item.xyGoodId === goods.item.xyGoodId) return
+    if (!confirmDiscardChanges()) return
+
     selectedGoods.value = goods
+    const accountId = selectedAccountId.value!
+    const goodsId = goods.item.xyGoodId
+    currentConfig.value = null
+    savedConfigSnapshot.value = ''
+    selectedSkuId.value = null
+    skuConfigs.value = new Map()
+    configLoadError.value = ''
+    resetDeliveryConfigFields()
+    configForm.value.autoConfirmShipment = 0
     recordsPageNum.value = 1
 
     await loadSkuList()
+    if (!isCurrentGoods(accountId, goodsId)) return
 
-    if (skuList.value.length > 1) {
+    if (!skuLoadError.value && skuList.value.length > 0) {
       selectedSkuId.value = skuList.value[0]?.skuId || null
       await loadAllSkuConfigs()
-    } else {
-      selectedSkuId.value = null
-      skuConfigs.value = new Map()
+      if (!isCurrentGoods(accountId, goodsId)) return
     }
 
-    await loadConfig()
+    if (!skuLoadError.value) await loadConfig()
     await loadDeliveryRecords()
     await loadKamiConfigOptions()
     await loadFixedTemplateOptions()
@@ -413,7 +508,27 @@ export function useAutoDelivery() {
     if (isMobile.value) { mobileView.value = 'config' }
   }
 
-  const handleSkuChange = async () => {
+  const handleSkuChange = async (skuId: string | null) => {
+    if (saving.value || configLoading.value || skuId === selectedSkuId.value) return
+    if (!confirmDiscardChanges()) return
+    selectedSkuId.value = skuId
+    savedConfigSnapshot.value = ''
+    await loadConfig()
+  }
+
+  const retrySkuLoad = async () => {
+    if (!selectedGoods.value) return
+    await loadSkuList()
+    if (skuLoadError.value) return
+    if (skuList.value.length > 0) {
+      const selectedExists = skuList.value.some(sku => sku.skuId === selectedSkuId.value)
+      selectedSkuId.value = selectedExists ? selectedSkuId.value : skuList.value[0]?.skuId || null
+      await loadAllSkuConfigs()
+      if (skuLoadError.value) return
+    } else {
+      selectedSkuId.value = null
+      skuConfigs.value = new Map()
+    }
     await loadConfig()
   }
 
@@ -440,13 +555,21 @@ export function useAutoDelivery() {
   const loadConfig = async () => {
     if (!selectedGoods.value || !selectedAccountId.value) return
 
+    const accountId = selectedAccountId.value
+    const goodsId = selectedGoods.value.item.xyGoodId
+    const skuId = selectedSkuId.value
+    const requestVersion = ++configRequestVersion
+    configLoading.value = true
+    configLoadError.value = ''
     try {
       const baseReq: GetAutoDeliveryConfigReq = {
-        xianyuAccountId: selectedAccountId.value,
-        xyGoodsId: selectedGoods.value.item.xyGoodId,
+        xianyuAccountId: accountId,
+        xyGoodsId: goodsId,
         skuId: null
       }
       const baseResponse = await getAutoDeliveryConfig(baseReq)
+      if (requestVersion !== configRequestVersion
+          || !isCurrentGoods(accountId, goodsId) || skuId !== selectedSkuId.value) return
       if (baseResponse.code === 0 || baseResponse.code === 200) {
         if (baseResponse.data) {
           configForm.value.autoConfirmShipment = baseResponse.data.autoConfirmShipment || 0
@@ -456,12 +579,14 @@ export function useAutoDelivery() {
       }
 
       const req: GetAutoDeliveryConfigReq = {
-        xianyuAccountId: selectedAccountId.value,
-        xyGoodsId: selectedGoods.value.item.xyGoodId,
-        skuId: selectedSkuId.value
+        xianyuAccountId: accountId,
+        xyGoodsId: goodsId,
+        skuId
       }
 
       const response = await getAutoDeliveryConfig(req)
+      if (requestVersion !== configRequestVersion
+          || !isCurrentGoods(accountId, goodsId) || skuId !== selectedSkuId.value) return
       if (response.code === 0 || response.code === 200) {
         currentConfig.value = response.data || null
         if (response.data) {
@@ -494,18 +619,38 @@ export function useAutoDelivery() {
           configForm.value.receiptFollowUpIntervalSeconds = 5
           configForm.value.autoDeliveryImageUrl = ''
         }
+        markConfigSaved()
       } else {
         throw new Error(response.msg || '获取配置失败')
       }
     } catch (error: any) {
+      if (requestVersion !== configRequestVersion
+          || !isCurrentGoods(accountId, goodsId) || skuId !== selectedSkuId.value) return
       console.error('加载配置失败:', error)
       currentConfig.value = null
+      resetDeliveryConfigFields()
+      savedConfigSnapshot.value = ''
+      configLoadError.value = error?.message || '发货配置加载失败，请重试'
+    } finally {
+      if (requestVersion === configRequestVersion) configLoading.value = false
     }
   }
 
   const saveConfig = async () => {
     if (!selectedGoods.value || !selectedAccountId.value) {
       showInfo('请先选择商品')
+      return
+    }
+    if (skuLoading.value || configLoading.value) {
+      showInfo('配置正在加载，请稍候')
+      return
+    }
+    if (skuLoadError.value || configLoadError.value) {
+      showInfo('配置加载失败，请先重试')
+      return
+    }
+    if (hasSku.value && !selectedSkuId.value) {
+      showInfo('请先选择商品规格')
       return
     }
 
@@ -574,7 +719,8 @@ export function useAutoDelivery() {
       if (response.code === 0 || response.code === 200) {
         showSuccess('保存配置成功')
         currentConfig.value = response.data || null
-        if (hasMultipleSku.value) {
+        markConfigSaved()
+        if (hasSku.value) {
           await loadAllSkuConfigs()
         }
       } else {
@@ -582,6 +728,7 @@ export function useAutoDelivery() {
       }
     } catch (error: any) {
       console.error('保存配置失败:', error)
+      showError(error?.message || '保存配置失败')
     } finally {
       saving.value = false
     }
@@ -696,6 +843,7 @@ export function useAutoDelivery() {
       showInfo('请先选择商品')
       return
     }
+    if (!confirmDiscardChanges()) return
     router.push({
       path: '/auto-reply',
       query: {
@@ -831,6 +979,8 @@ export function useAutoDelivery() {
   const recordsTotalPages = computed(() => Math.ceil(recordsTotal.value / recordsPageSize.value))
 
   const toggleOnlyOnSale = () => {
+    if (!confirmDiscardChanges()) return
+    savedConfigSnapshot.value = ''
     onlyOnSale.value = !onlyOnSale.value
     goodsCurrentPage.value = 1
     selectedGoods.value = null
@@ -841,10 +991,12 @@ export function useAutoDelivery() {
     loadAccounts()
     checkScreenSize()
     window.addEventListener('resize', checkScreenSize)
+    window.addEventListener('beforeunload', handleBeforeUnload)
   })
 
   onUnmounted(() => {
     window.removeEventListener('resize', checkScreenSize)
+    window.removeEventListener('beforeunload', handleBeforeUnload)
   })
 
   return {
@@ -859,7 +1011,13 @@ export function useAutoDelivery() {
     skuList,
     selectedSkuId,
     skuConfigs,
-    hasMultipleSku,
+    skuLoading,
+    skuLoadError,
+    configLoading,
+    configLoadError,
+    hasSku,
+    configuredSkuCount,
+    hasUnsavedChanges,
     hasFixedDelivery,
     hasCardDelivery,
     goodsCurrentPage,
@@ -909,6 +1067,7 @@ export function useAutoDelivery() {
     handleDialogConfirm,
     handleDialogCancel,
     handleSkuChange,
+    retrySkuLoad,
     copyApiUrl,
     copyApiParams,
     copyConfirmShipmentUrl,
