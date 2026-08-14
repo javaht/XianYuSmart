@@ -1,5 +1,7 @@
 # XianYuSmart
 
+[English](README.en.md) | **简体中文**
+
 [![Stars](https://img.shields.io/github/stars/Evvvvvvvan/XianYuSmart?style=flat&color=2f6f5e)](https://github.com/Evvvvvvvan/XianYuSmart/stargazers)
 [![Forks](https://img.shields.io/github/forks/Evvvvvvvan/XianYuSmart?style=flat&color=2f6f5e)](https://github.com/Evvvvvvvan/XianYuSmart/forks)
 [![Release](https://img.shields.io/github/v/release/Evvvvvvvan/XianYuSmart?display_name=tag&color=2f6f5e)](https://github.com/Evvvvvvvan/XianYuSmart/releases/latest)
@@ -434,14 +436,10 @@ docker compose exec mysql mysqldump -uxianyusmart -p xianyusmart > xianyusmart.s
 **禁止任何商业用途**，包括销售、收费部署、托管服务、SaaS、代运营、商业获客、收费培训，以及通过广告、订阅、佣金或增值服务直接或间接获利。
 
 - 使用行为必须遵守法律法规、闲鱼平台服务协议和账号使用规则。
-- 严禁用于欺诈、骚扰、垃圾信息、虚假交易、恶意营销、批量账号控制或规避平台安全机制。
-- 自动化操作可能触发验证码、滑块验证、登录失效、账号限制或封禁。
-- Cookie、Token、密码、API Key 和卡密属于敏感数据，必须妥善保管并定期备份。
-- 本项目按“现状”提供，在适用法律允许的最大范围内不对账号、数据、交易或业务损失承担责任。
 
 下载、复制、修改、部署、运行或分发本项目，即表示已阅读并接受 [完整使用限制与免责声明](DISCLAIMER.md)。
 
-## Star History
+## ⭐ Star History
 
 <a href="docs/assets/star-history-light.png">
   <picture>
@@ -450,4 +448,4 @@ docker compose exec mysql mysqldump -uxianyusmart -p xianyusmart > xianyusmart.s
     <img alt="XianYuSmart Star History Chart" src="docs/assets/star-history-light.png" width="100%" />
   </picture>
 </a>
-<sub>由 [`scripts/gen_star_history.py`](scripts/gen_star_history.py) 生成，[GitHub Actions](.github/workflows/star-history.yml) 每日自动更新 · 点击图片查看大图</sub>
+<sub>由 <a href="scripts/gen_star_history.py"><code>scripts/gen_star_history.py</code></a> 生成，<a href=".github/workflows/star-history.yml">GitHub Actions</a> 每日自动更新 · 点击图片查看大图</sub>
